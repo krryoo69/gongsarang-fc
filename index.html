@@ -439,36 +439,69 @@ let duesSettleYear = new Date().getFullYear();
 const POSITIONS = ['GK','DF','MF','FW'];
 const ROLES = ['회원','주장','부주장','총무','회계'];
 
+/* ============================================================
+   Supabase 저장소 연동 (window.storage 대체)
+   ============================================================ */
+const SUPABASE_URL = 'https://mwbldjggesjloaqalium.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_qLmu-mpQAeUCdMKoCSJsEw_oU7vB3ZP';
+
+async function dbGet(key){
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}&select=value`,
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+  );
+  if(!res.ok) throw new Error('supabase get failed: ' + res.status);
+  const rows = await res.json();
+  if(!rows.length || rows[0].value === null || rows[0].value === undefined) return null;
+  return { key, value: JSON.stringify(rows[0].value) };
+}
+
+async function dbSet(key, valueStr){
+  const parsed = JSON.parse(valueStr);
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/app_storage`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates'
+    },
+    body: JSON.stringify([{ key, value: parsed, updated_at: new Date().toISOString() }])
+  });
+  if(!res.ok) throw new Error('supabase set failed: ' + res.status);
+  return { key, value: valueStr };
+}
+
 function uid(prefix){ return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 function monthKey(d){ const dt = d ? new Date(d) : new Date(); return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0'); }
 function todayMonthKey(){ return monthKey(new Date()); }
 
 async function loadData(){
   try{
-    const m = await window.storage.get('members', true);
+    const m = await dbGet('members');
     MEMBERS = m ? JSON.parse(m.value) : [];
-  }catch(e){ MEMBERS = []; }
+  }catch(e){ MEMBERS = []; showToast('회원 데이터를 불러오지 못했어요'); }
   try{
-    const mt = await window.storage.get('matches', true);
+    const mt = await dbGet('matches');
     MATCHES = mt ? JSON.parse(mt.value) : [];
-  }catch(e){ MATCHES = []; }
+  }catch(e){ MATCHES = []; showToast('경기 데이터를 불러오지 못했어요'); }
   try{
-    const st = await window.storage.get('settings', true);
+    const st = await dbGet('settings');
     SETTINGS = st ? JSON.parse(st.value) : { monthlyDues: 30000 };
   }catch(e){ SETTINGS = { monthlyDues: 30000 }; }
   updateFabVisibility();
   renderAll();
 }
 async function saveMembers(){
-  try{ await window.storage.set('members', JSON.stringify(MEMBERS), true); }
+  try{ await dbSet('members', JSON.stringify(MEMBERS)); }
   catch(e){ showToast('저장 실패 - 다시 시도해주세요'); }
 }
 async function saveMatches(){
-  try{ await window.storage.set('matches', JSON.stringify(MATCHES), true); }
+  try{ await dbSet('matches', JSON.stringify(MATCHES)); }
   catch(e){ showToast('저장 실패 - 다시 시도해주세요'); }
 }
 async function saveSettings(){
-  try{ await window.storage.set('settings', JSON.stringify(SETTINGS), true); }
+  try{ await dbSet('settings', JSON.stringify(SETTINGS)); }
   catch(e){ showToast('저장 실패 - 다시 시도해주세요'); }
 }
 
