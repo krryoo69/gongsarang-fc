@@ -465,9 +465,28 @@ const REGIONS = ['서울','경기','인천','강원','충북','충남','대전',
 const EXPENSE_CATEGORIES = ['경기장','식사','간식','용품구입','기타'];
 const EXEC_ROLES = ['회장','고문','부회장','감독','코치','총무','회계'];
 const COUNCIL_ROLES = ['회장','고문']; // 상호 승인으로만 취득 가능한 최고 의결권 역할
+const PRACTICAL_EXEC_ROLES = ['부회장','감독','코치','총무','회계']; // 실무 집행부 - 겸직 가능, 지정/해제 시 PIN 확인
+
+// 예전 단일 role 문자열 데이터를 roles 배열로 자동 변환 (하위호환, 1회성)
+function migrateRoles(m){
+  if(!Array.isArray(m.roles)){
+    m.roles = (m.role && m.role !== '회원') ? [m.role] : [];
+  }
+}
+function hasRole(m, r){ migrateRoles(m); return m.roles.includes(r); }
+function roleLabel(m){
+  migrateRoles(m);
+  return m.roles.length ? m.roles.join(' · ') : '회원';
+}
+function hasAnyRole(m){ migrateRoles(m); return m.roles.length > 0; }
+function addRole(m, r){ migrateRoles(m); if(!m.roles.includes(r)) m.roles.push(r); }
+function removeRole(m, r){ migrateRoles(m); m.roles = m.roles.filter(x=>x!==r); }
+function isChief(m){ return !!(m && hasRole(m,'회장')); }
+function isAdvisor(m){ return !!(m && hasRole(m,'고문')); }
+function advisorMembers(){ return activeRoster().filter(x=>hasRole(x,'고문')); }
 
 function councilMembers(){
-  return activeRoster().filter(m => COUNCIL_ROLES.includes(m.role));
+  return activeRoster().filter(m => { migrateRoles(m); return m.roles.some(r=>COUNCIL_ROLES.includes(r)); });
 }
 const MY_ID_KEY = 'gsfc_my_member_id';
 
@@ -483,7 +502,9 @@ function currentMember(){
 }
 function isExec(){
   const me = currentMember();
-  return !!(me && me.status!=='pending' && EXEC_ROLES.includes(me.role));
+  if(!me || me.status==='pending') return false;
+  migrateRoles(me);
+  return me.roles.some(r=>EXEC_ROLES.includes(r));
 }
 function isSelf(memberId){
   const me = currentMember();
@@ -494,7 +515,7 @@ function updateWhoAmILabel(){
   if(!btn) return;
   const me = currentMember();
   btn.textContent = me ? (me.name.charAt(0)) : '👤';
-  btn.title = me ? `${me.name}${isExec()?' · 집행부':''} (본인 확인 변경)` : '본인 확인';
+  btn.title = me ? `${me.name}${isExec()?' · '+roleLabel(me):''} (본인 확인 변경)` : '본인 확인';
 }
 function openWhoAmIPicker(){
   const activeMembers = [...MEMBERS].sort((a,b)=>(a.number||999)-(b.number||999));
@@ -507,7 +528,7 @@ function openWhoAmIPicker(){
     </div>
     <select id="f_whoami">
       <option value="">선택 안함</option>
-      ${activeMembers.map(m=>`<option value="${m.id}" ${me&&me.id===m.id?'selected':''}>${escapeHTML(m.name)}${EXEC_ROLES.includes(m.role)&&m.status!=='pending'?' ('+m.role+')':''}${m.status==='pending'?' (승인대기)':''}</option>`).join('')}
+      ${activeMembers.map(m=>`<option value="${m.id}" ${me&&me.id===m.id?'selected':''}>${escapeHTML(m.name)}${hasRole(m,'회장')||hasRole(m,'고문')||m.roles.some(r=>EXEC_ROLES.includes(r))?(m.status!=='pending'?' ('+roleLabel(m)+')':''):''}${m.status==='pending'?' (승인대기)':''}</option>`).join('')}
     </select>
     <div class="modal-foot">
       <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
@@ -594,6 +615,7 @@ async function loadData(){
   try{
     const m = await dbGet('members');
     MEMBERS = m ? JSON.parse(m.value) : [];
+    MEMBERS.forEach(migrateRoles);
   }catch(e){ MEMBERS = []; showToast('회원 데이터를 불러오지 못했어요: ' + e.message); }
   try{
     const mt = await dbGet('matches');
@@ -811,23 +833,27 @@ function memberById(id){ return MEMBERS.find(m=>m.id===id); }
 function activeRoster(){ return MEMBERS.filter(m=>m.status!=='pending'); }
 
 async function applyForLeaderRole(m, targetRole){
+  if(hasRole(m, targetRole)){ showToast(`이미 ${targetRole}이에요`); return; }
   if(m.pendingLeaderRequest){ showToast('이미 신청이 진행 중이에요'); return; }
   const council = councilMembers();
   if(council.length === 0){
     // 최초의 회장/고문은 승인 없이 스스로 지정
-    m.role = targetRole;
-    await saveMembers();
+    addRole(m, targetRole);
+    const ok = await saveMembers();
+    if(!ok){ removeRole(m, targetRole); renderAll(); return; }
     renderAll();
     showToast(`최초 ${targetRole}(으)로 지정되었습니다`);
     return;
   }
+  const prevReq = m.pendingLeaderRequest;
   m.pendingLeaderRequest = {
     targetRole,
     requiredApproverIds: council.map(c=>c.id),
     approvedBy: [],
     appliedAt: new Date().toISOString()
   };
-  await saveMembers();
+  const ok = await saveMembers();
+  if(!ok){ m.pendingLeaderRequest = prevReq; renderAll(); return; }
   renderAll();
   showToast(`${targetRole} 신청을 접수했어요. 기존 회장·고문 전원 승인이 필요해요 (0/${council.length})`);
 }
@@ -839,29 +865,36 @@ async function approveLeaderRequest(m){
   if(!req){ return; }
   if(!req.requiredApproverIds.includes(me.id)){ showToast('이 신청의 승인 권한이 없어요'); return; }
   if(req.approvedBy.includes(me.id)){ showToast('이미 승인하셨어요'); return; }
+  const prevApprovedBy = [...req.approvedBy];
+  const prevReq = { ...req, approvedBy: prevApprovedBy };
+  const prevRoles = [...(m.roles||[])];
   req.approvedBy.push(me.id);
   if(req.approvedBy.length >= req.requiredApproverIds.length){
-    m.role = req.targetRole;
+    addRole(m, req.targetRole);
     delete m.pendingLeaderRequest;
-    await saveMembers();
+    const ok = await saveMembers();
+    if(!ok){ m.roles = prevRoles; m.pendingLeaderRequest = prevReq; renderAll(); return; }
     renderAll();
-    showToast(`${m.name}님이 ${m.role}(으)로 승인·지정되었습니다`);
+    showToast(`${m.name}님이 ${req.targetRole}(으)로 승인·지정되었습니다`);
   }else{
-    await saveMembers();
+    const ok = await saveMembers();
+    if(!ok){ m.pendingLeaderRequest = prevReq; renderAll(); return; }
     renderAll();
     showToast(`승인했어요 (${req.approvedBy.length}/${req.requiredApproverIds.length})`);
   }
 }
 
 async function cancelLeaderRequest(m){
+  const prevReq = m.pendingLeaderRequest;
   delete m.pendingLeaderRequest;
-  await saveMembers();
+  const ok = await saveMembers();
+  if(!ok){ m.pendingLeaderRequest = prevReq; renderAll(); return; }
   renderAll();
   showToast('신청을 취소했어요');
 }
 
-async function proposeRemoval(m){
-  if(!COUNCIL_ROLES.includes(m.role)){ return; }
+async function proposeRemoval(m, targetRole){
+  if(!hasRole(m, targetRole)){ return; }
   if(m.pendingRemovalRequest){ showToast('이미 해임 절차가 진행 중이에요'); return; }
   const me = currentMember();
   if(!me){ showToast('본인 확인(👤)을 먼저 해주세요'); return; }
@@ -870,15 +903,18 @@ async function proposeRemoval(m){
     showToast('다른 회장·고문이 없어서 해임 절차를 진행할 수 없어요. 본인이 직접 직책을 변경해야 해요.');
     return;
   }
+  const prevReq = m.pendingRemovalRequest;
   m.pendingRemovalRequest = {
+    targetRole,
     requiredApproverIds: others.map(o=>o.id),
     approvedBy: [],
     proposedBy: me.id,
     appliedAt: new Date().toISOString()
   };
-  await saveMembers();
+  const ok = await saveMembers();
+  if(!ok){ m.pendingRemovalRequest = prevReq; renderAll(); return; }
   renderAll();
-  showToast(`해임 절차를 시작했어요. 본인 외 회장·고문 전원 동의가 필요해요 (0/${others.length})`);
+  showToast(`${targetRole} 해임 절차를 시작했어요. 본인 외 회장·고문 전원 동의가 필요해요 (0/${others.length})`);
 }
 
 async function approveRemoval(m){
@@ -888,26 +924,127 @@ async function approveRemoval(m){
   if(!req) return;
   if(!req.requiredApproverIds.includes(me.id)){ showToast('이 요청의 승인 권한이 없어요'); return; }
   if(req.approvedBy.includes(me.id)){ showToast('이미 동의하셨어요'); return; }
+  const prevApprovedBy = [...req.approvedBy];
+  const prevReq = { ...req, approvedBy: prevApprovedBy };
+  const prevRoles = [...(m.roles||[])];
   req.approvedBy.push(me.id);
   if(req.approvedBy.length >= req.requiredApproverIds.length){
-    const oldRole = m.role;
-    m.role = '회원';
+    removeRole(m, req.targetRole);
     delete m.pendingRemovalRequest;
-    await saveMembers();
+    const ok = await saveMembers();
+    if(!ok){ m.roles = prevRoles; m.pendingRemovalRequest = prevReq; renderAll(); return; }
     renderAll();
-    showToast(`${m.name}님의 ${oldRole} 직책이 해임되었습니다`);
+    showToast(`${m.name}님의 ${req.targetRole} 직책이 해임되었습니다`);
   }else{
-    await saveMembers();
+    const ok = await saveMembers();
+    if(!ok){ m.pendingRemovalRequest = prevReq; renderAll(); return; }
     renderAll();
     showToast(`동의했어요 (${req.approvedBy.length}/${req.requiredApproverIds.length})`);
   }
 }
 
 async function cancelRemoval(m){
+  const prevReq = m.pendingRemovalRequest;
   delete m.pendingRemovalRequest;
-  await saveMembers();
+  const ok = await saveMembers();
+  if(!ok){ m.pendingRemovalRequest = prevReq; renderAll(); return; }
   renderAll();
   showToast('해임 절차를 취소했어요');
+}
+
+/* ---------- 실무 직책(부회장/감독/코치/총무/회계) 임명·해임: 회장 독자적 / 고문 전원 동의 ---------- */
+function applyRoleDiff(m, rolesToAdd, rolesToRemove){
+  migrateRoles(m);
+  let roles = m.roles.filter(r=>!rolesToRemove.includes(r));
+  rolesToAdd.forEach(r=>{ if(!roles.includes(r)) roles.push(r); });
+  m.roles = roles;
+}
+
+async function proposePracticalRoleChange(m, rolesToAdd, rolesToRemove){
+  const me = currentMember();
+  if(!me){ showToast('본인 확인(👤)을 먼저 해주세요'); return false; }
+  if(m.pendingPracticalRoleRequest){ showToast('이미 진행 중인 실무 직책 변경 요청이 있어요'); return false; }
+  if(!rolesToAdd.length && !rolesToRemove.length) return true;
+
+  if(isChief(me)){
+    // 회장은 독자적으로 즉시 적용
+    const prevRoles = [...m.roles];
+    applyRoleDiff(m, rolesToAdd, rolesToRemove);
+    const ok = await saveMembers();
+    if(!ok){ m.roles = prevRoles; renderAll(); return false; }
+    renderAll();
+    showToast('실무 직책을 변경했습니다');
+    return true;
+  }
+
+  if(isAdvisor(me)){
+    const others = advisorMembers().filter(a=>a.id!==me.id);
+    if(others.length===0){
+      // 고문이 본인 1명뿐이면 전원 동의가 곧 본인 동의이므로 즉시 적용
+      const prevRoles = [...m.roles];
+      applyRoleDiff(m, rolesToAdd, rolesToRemove);
+      const ok = await saveMembers();
+      if(!ok){ m.roles = prevRoles; renderAll(); return false; }
+      renderAll();
+      showToast('실무 직책을 변경했습니다');
+      return true;
+    }
+    const prevReq = m.pendingPracticalRoleRequest;
+    m.pendingPracticalRoleRequest = {
+      rolesToAdd, rolesToRemove,
+      requiredApproverIds: others.map(o=>o.id),
+      approvedBy: [],
+      proposedBy: me.id,
+      appliedAt: new Date().toISOString()
+    };
+    const ok = await saveMembers();
+    if(!ok){ m.pendingPracticalRoleRequest = prevReq; renderAll(); return false; }
+    renderAll();
+    showToast(`실무 직책 변경을 제안했어요. 다른 고문 전원 동의가 필요해요 (0/${others.length})`);
+    return true;
+  }
+
+  showToast('실무 직책 임명·해임은 회장 또는 고문만 할 수 있어요');
+  return false;
+}
+
+async function approvePracticalRoleRequest(m){
+  const me = currentMember();
+  if(!me){ showToast('본인 확인(👤)을 먼저 해주세요'); return; }
+  const req = m.pendingPracticalRoleRequest;
+  if(!req) return;
+  if(!req.requiredApproverIds.includes(me.id)){ showToast('이 요청의 승인 권한이 없어요'); return; }
+  if(req.approvedBy.includes(me.id)){ showToast('이미 동의하셨어요'); return; }
+  const prevApprovedBy = [...req.approvedBy];
+  const prevReq = { ...req, approvedBy: prevApprovedBy };
+  const prevRoles = [...m.roles];
+  req.approvedBy.push(me.id);
+  if(req.approvedBy.length >= req.requiredApproverIds.length){
+    applyRoleDiff(m, req.rolesToAdd, req.rolesToRemove);
+    delete m.pendingPracticalRoleRequest;
+    const ok = await saveMembers();
+    if(!ok){ m.roles = prevRoles; m.pendingPracticalRoleRequest = prevReq; renderAll(); return; }
+    renderAll();
+    showToast(`${m.name}님의 실무 직책이 변경되었습니다`);
+  }else{
+    const ok = await saveMembers();
+    if(!ok){ m.pendingPracticalRoleRequest = prevReq; renderAll(); return; }
+    renderAll();
+    showToast(`동의했어요 (${req.approvedBy.length}/${req.requiredApproverIds.length})`);
+  }
+}
+
+async function cancelPracticalRoleRequest(m){
+  const me = currentMember();
+  const req = m.pendingPracticalRoleRequest;
+  if(!req) return;
+  if(!(me && (req.proposedBy===me.id || isChief(me)))){ showToast('제안자 또는 회장만 취소할 수 있어요'); return; }
+  const prevReq = req;
+  delete m.pendingPracticalRoleRequest;
+  const ok = await saveMembers();
+  if(!ok){ m.pendingPracticalRoleRequest = prevReq; renderAll(); return; }
+  renderAll();
+  showToast('실무 직책 변경 제안을 취소했어요');
 }
 
 function rsvpStatus(m, mid){
@@ -942,8 +1079,10 @@ function renderLeaderRequestBanner(){
   const myApprovals = me ? applicants.filter(m => m.pendingLeaderRequest.requiredApproverIds.includes(me.id) && !m.pendingLeaderRequest.approvedBy.includes(me.id)) : [];
   const removals = MEMBERS.filter(m => m.pendingRemovalRequest);
   const myRemovalApprovals = me ? removals.filter(m => m.pendingRemovalRequest.requiredApproverIds.includes(me.id) && !m.pendingRemovalRequest.approvedBy.includes(me.id)) : [];
+  const practicalReqs = MEMBERS.filter(m => m.pendingPracticalRoleRequest);
+  const myPracticalApprovals = me ? practicalReqs.filter(m => m.pendingPracticalRoleRequest.requiredApproverIds.includes(me.id) && !m.pendingPracticalRoleRequest.approvedBy.includes(me.id)) : [];
 
-  if(myApprovals.length === 0 && myRemovalApprovals.length === 0){ el.innerHTML = ''; return; }
+  if(myApprovals.length === 0 && myRemovalApprovals.length === 0 && myPracticalApprovals.length === 0){ el.innerHTML = ''; return; }
 
   el.innerHTML = `
     <div class="card" style="padding:12px 14px; margin-bottom:12px; border-color:var(--gold);">
@@ -959,10 +1098,21 @@ function renderLeaderRequestBanner(){
       <div style="font-size:12px; color:#FF9B92; font-weight:600; margin:${myApprovals.length?'12px':'0'} 0 8px;">⚠️ 회장·고문 해임 동의 요청 (${myRemovalApprovals.length}건)</div>
       ${myRemovalApprovals.map(m=>`
         <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0;">
-          <div style="font-size:13px;">${escapeHTML(m.name)} (${m.role}) 해임 (${m.pendingRemovalRequest.approvedBy.length}/${m.pendingRemovalRequest.requiredApproverIds.length})</div>
+          <div style="font-size:13px;">${escapeHTML(m.name)} (${m.pendingRemovalRequest.targetRole}) 해임 (${m.pendingRemovalRequest.approvedBy.length}/${m.pendingRemovalRequest.requiredApproverIds.length})</div>
           <button class="btn btn-danger btn-sm" data-remove-approve-id="${m.id}">동의</button>
         </div>
       `).join('')}` : ''}
+      ${myPracticalApprovals.length ? `
+      <div style="font-size:12px; color:var(--gold); font-weight:600; margin:${(myApprovals.length||myRemovalApprovals.length)?'12px':'0'} 0 8px;">⏳ 실무 직책 변경 동의 요청 (${myPracticalApprovals.length}건)</div>
+      ${myPracticalApprovals.map(m=>{
+        const req = m.pendingPracticalRoleRequest;
+        const diffLabel = [req.rolesToAdd.length?`+${req.rolesToAdd.join('·')}`:'', req.rolesToRemove.length?`-${req.rolesToRemove.join('·')}`:''].filter(Boolean).join(' ');
+        return `
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0;">
+          <div style="font-size:13px;">${escapeHTML(m.name)} (${escapeHTML(diffLabel)}) (${req.approvedBy.length}/${req.requiredApproverIds.length})</div>
+          <button class="btn btn-primary btn-sm" data-practical-approve-id="${m.id}">동의</button>
+        </div>`;
+      }).join('')}` : ''}
     </div>
   `;
   el.querySelectorAll('[data-approve-id]').forEach(btn=>{
@@ -970,6 +1120,9 @@ function renderLeaderRequestBanner(){
   });
   el.querySelectorAll('[data-remove-approve-id]').forEach(btn=>{
     btn.addEventListener('click', ()=> approveRemoval(memberById(btn.dataset.removeApproveId)));
+  });
+  el.querySelectorAll('[data-practical-approve-id]').forEach(btn=>{
+    btn.addEventListener('click', ()=> approvePracticalRoleRequest(memberById(btn.dataset.practicalApproveId)));
   });
 }
 
@@ -1000,7 +1153,7 @@ function renderMemberList(){
     <div class="member-row" data-id="${m.id}" style="${pending?'opacity:0.75;':''}">
       <div class="jersey">${m.number ?? '-'}</div>
       <div class="member-info">
-        <div class="name">${escapeHTML(m.name)} ${pending ? `<span class="role-tag" style="background:rgba(193,68,60,0.18); color:#FF9B92;">승인대기</span>` : (m.role && m.role!=='회원' ? `<span class="role-tag">${m.role}</span>` : '')}</div>
+        <div class="name">${escapeHTML(m.name)} ${pending ? `<span class="role-tag" style="background:rgba(193,68,60,0.18); color:#FF9B92;">승인대기</span>` : (hasAnyRole(m) ? `<span class="role-tag">${roleLabel(m)}</span>` : '')}</div>
         <div class="sub">${m.position || '-'} · ${m.birthYear?m.birthYear+'년생':'-'} · ${m.region||'-'}${m.regionDetail?' '+escapeHTML(m.regionDetail):''}</div>
       </div>
       ${pending ? '' : `<div class="dues-dot ${paid?'paid':'unpaid'}" title="${paid?'이번달 회비 납부':'이번달 회비 미납'}"></div>`}
@@ -1028,7 +1181,7 @@ function openMemberDetail(id){
     <div class="detail-header">
       <div class="jersey">${m.number ?? '-'}</div>
       <div>
-        <div class="name">${escapeHTML(m.name)} ${m.role && m.role!=='회원' ? `<span class="role-tag">${m.role}</span>` : ''}</div>
+        <div class="name">${escapeHTML(m.name)} ${hasAnyRole(m) ? `<span class="role-tag">${roleLabel(m)}</span>` : ''}</div>
         <div class="sub">${m.position || '-'} · ${m.birthYear?m.birthYear+'년생':'-'} · ${m.region||'-'}${m.regionDetail?' '+escapeHTML(m.regionDetail):''} · ${m.phone || '연락처 없음'}</div>
       </div>
     </div>
@@ -1154,6 +1307,7 @@ function openBulkPrepayForm(m, years){
     const startMonth = Number(document.getElementById('f_prepayStart').value);
     const count = Math.min(60, Math.max(1, Number(document.getElementById('f_prepayCount').value)||1));
     m.dues = m.dues || {};
+    const prevDues = {...m.dues};
     let y = detailYear, mo = startMonth;
     for(let i=0; i<count; i++){
       const key = y + '-' + String(mo).padStart(2,'0');
@@ -1161,7 +1315,8 @@ function openBulkPrepayForm(m, years){
       mo++;
       if(mo>12){ mo=1; y++; }
     }
-    await saveMembers();
+    const ok = await saveMembers();
+    if(!ok){ m.dues = prevDues; renderMemberDetail(m, years); renderAll(); return; }
     closeModal();
     renderMemberDetail(m, years);
     renderAll();
@@ -1170,7 +1325,10 @@ function openBulkPrepayForm(m, years){
 }
 
 function renderLeaderRequestSection(m){
+  migrateRoles(m);
   const council = councilMembers();
+  const heldCouncilRoles = COUNCIL_ROLES.filter(r=>hasRole(m,r));
+  const availableToApply = COUNCIL_ROLES.filter(r=>!hasRole(m,r));
   if(m.pendingLeaderRequest){
     const req = m.pendingLeaderRequest;
     return `
@@ -1181,24 +1339,24 @@ function renderLeaderRequestSection(m){
         <button class="btn btn-ghost btn-sm btn-block" id="btnCancelLeaderReq">신청 취소</button>
       </div>`;
   }
-  if(COUNCIL_ROLES.includes(m.role)){
-    return `<div class="match-meta" style="margin-top:10px; color:var(--gold);">현재 직책: ${m.role} (최고 의결권)</div>`;
-  }
   return `
     <div class="card" style="padding:12px 14px; margin-top:10px;">
+      ${heldCouncilRoles.length ? `<div style="font-size:12.5px; color:var(--gold); margin-bottom:8px;">현재 직책: ${heldCouncilRoles.join(' · ')} (최고 의결권)</div>` : ''}
+      ${availableToApply.length ? `
       <div style="font-size:11.5px; color:var(--chalk-dim); margin-bottom:8px;">
         ${council.length===0
           ? '아직 회장·고문이 한 명도 없어요. 지금 신청하면 승인 절차 없이 바로 지정돼요.'
-          : `회장·고문이 되려면 기존 회장·고문 전원(${council.length}명)의 만장일치 승인이 필요해요.`}
+          : `추가로 회장·고문을 겸직하려면 기존 회장·고문 전원(${council.length}명)의 만장일치 승인이 필요해요.`}
       </div>
       <div style="display:flex; gap:8px;">
-        <button class="btn btn-ghost btn-sm" style="flex:1;" id="btnApplyChief">회장 신청</button>
-        <button class="btn btn-ghost btn-sm" style="flex:1;" id="btnApplyAdvisor">고문 신청</button>
-      </div>
+        ${availableToApply.map(r=>`<button class="btn btn-ghost btn-sm" style="flex:1;" data-apply-council="${r}">${r} 신청</button>`).join('')}
+      </div>` : ''}
     </div>`;
 }
 
 function renderRemovalSection(m){
+  migrateRoles(m);
+  const heldCouncilRoles = COUNCIL_ROLES.filter(r=>hasRole(m,r));
   if(m.pendingRemovalRequest){
     const req = m.pendingRemovalRequest;
     const me = currentMember();
@@ -1206,7 +1364,7 @@ function renderRemovalSection(m){
     return `
       <div class="card" style="padding:12px 14px; margin-top:10px; border-color:#C1443C;">
         <div style="font-size:12.5px; margin-bottom:8px; color:#FF9B92;">
-          ⚠️ 해임 절차 진행 중 · 동의 ${req.approvedBy.length}/${req.requiredApproverIds.length}
+          ⚠️ ${req.targetRole} 해임 절차 진행 중 · 동의 ${req.approvedBy.length}/${req.requiredApproverIds.length}
         </div>
         <div style="display:flex; gap:8px;">
           ${canApprove ? `<button class="btn btn-danger btn-sm" style="flex:1;" id="btnApproveRemoval">동의</button>` : ''}
@@ -1214,30 +1372,59 @@ function renderRemovalSection(m){
         </div>
       </div>`;
   }
+  if(!heldCouncilRoles.length) return '';
   return `
     <div class="card" style="padding:12px 14px; margin-top:10px;">
       <div style="font-size:11.5px; color:var(--chalk-dim); margin-bottom:8px;">
-        현재 직책: <b style="color:var(--gold);">${m.role}</b> — 해임하려면 본인 외 회장·고문 전원의 동의가 필요해요.
+        현재 직책: <b style="color:var(--gold);">${heldCouncilRoles.join(' · ')}</b> — 해임하려면 본인 외 회장·고문 전원의 동의가 필요해요.
       </div>
-      <button class="btn btn-danger btn-sm btn-block" id="btnProposeRemoval">해임 절차 시작</button>
+      <div style="display:flex; gap:8px;">
+        ${heldCouncilRoles.map(r=>`<button class="btn btn-danger btn-sm" style="flex:1;" data-propose-removal="${r}">${r} 해임 시작</button>`).join('')}
+      </div>
+    </div>`;
+}
+
+function renderPracticalRoleRequestSection(m){
+  const req = m.pendingPracticalRoleRequest;
+  if(!req) return '';
+  const me = currentMember();
+  const canApprove = me && req.requiredApproverIds.includes(me.id) && !req.approvedBy.includes(me.id);
+  const diffLabel = [
+    req.rolesToAdd.length ? `+${req.rolesToAdd.join('·')}` : '',
+    req.rolesToRemove.length ? `-${req.rolesToRemove.join('·')}` : ''
+  ].filter(Boolean).join(' ');
+  return `
+    <div class="card" style="padding:12px 14px; margin-top:10px; border-color:var(--gold);">
+      <div style="font-size:12.5px; margin-bottom:8px;">
+        ⏳ 실무 직책 변경 제안 (${escapeHTML(diffLabel)}) · 고문 동의 ${req.approvedBy.length}/${req.requiredApproverIds.length}
+      </div>
+      <div style="display:flex; gap:8px;">
+        ${canApprove ? `<button class="btn btn-primary btn-sm" style="flex:1;" id="btnApprovePracticalRole">동의</button>` : ''}
+        <button class="btn btn-ghost btn-sm" style="flex:1;" id="btnCancelPracticalRole">제안 취소</button>
+      </div>
     </div>`;
 }
 
 function bindLeaderRequestButtons(m){
   if(!m) return;
-  const applyChief = document.getElementById('btnApplyChief');
-  const applyAdvisor = document.getElementById('btnApplyAdvisor');
+  document.querySelectorAll('[data-apply-council]').forEach(btn=>{
+    btn.addEventListener('click', ()=> applyForLeaderRole(m, btn.dataset.applyCouncil));
+  });
   const cancelBtn = document.getElementById('btnCancelLeaderReq');
-  if(applyChief) applyChief.addEventListener('click', ()=> applyForLeaderRole(m, '회장'));
-  if(applyAdvisor) applyAdvisor.addEventListener('click', ()=> applyForLeaderRole(m, '고문'));
   if(cancelBtn) cancelBtn.addEventListener('click', ()=> cancelLeaderRequest(m));
 
-  const proposeBtn = document.getElementById('btnProposeRemoval');
+  document.querySelectorAll('[data-propose-removal]').forEach(btn=>{
+    btn.addEventListener('click', ()=> proposeRemoval(m, btn.dataset.proposeRemoval));
+  });
   const approveRemovalBtn = document.getElementById('btnApproveRemoval');
   const cancelRemovalBtn = document.getElementById('btnCancelRemoval');
-  if(proposeBtn) proposeBtn.addEventListener('click', ()=> proposeRemoval(m));
   if(approveRemovalBtn) approveRemovalBtn.addEventListener('click', ()=> approveRemoval(m));
   if(cancelRemovalBtn) cancelRemovalBtn.addEventListener('click', ()=> cancelRemoval(m));
+
+  const approvePrBtn = document.getElementById('btnApprovePracticalRole');
+  const cancelPrBtn = document.getElementById('btnCancelPracticalRole');
+  if(approvePrBtn) approvePrBtn.addEventListener('click', ()=> approvePracticalRoleRequest(m));
+  if(cancelPrBtn) cancelPrBtn.addEventListener('click', ()=> cancelPracticalRoleRequest(m));
 }
 
 function openMemberForm(id){
@@ -1249,8 +1436,12 @@ function openMemberForm(id){
   }
 
   const mk = todayMonthKey();
-  const canEditRoleAndDues = !m || isExec(); // 직책/회비/등번호는 집행부만 확정 가능
-  const roleFullyLocked = !!(m && COUNCIL_ROLES.includes(m.role) && !isSelf(m.id)); // 타인의 회장/고문 직책은 해임절차로만 변경 가능
+  const canEditRoleAndDues = !m || isExec(); // 직책(주장/부주장 등 일반)/회비/등번호는 집행부만 확정 가능
+  if(m) migrateRoles(m);
+  const roleFullyLocked = !!(m && m.roles.some(r=>COUNCIL_ROLES.includes(r)) && !isSelf(m.id)); // 타인의 회장/고문 직책은 해임절차로만 변경 가능
+  const actor = currentMember();
+  const hasPendingPracticalReq = !!(m && m.pendingPracticalRoleRequest);
+  const canEditPracticalRoles = !!m && !hasPendingPracticalReq && (isChief(actor) || isAdvisor(actor)); // 실무직책 임명·해임은 회장 단독 또는 고문 전원동의
 
   const html = `
     <div class="modal-head"><h3>${m?'회원 정보 수정':'새 회원 등록'}</h3><button class="close-x" onclick="closeModal()">✕</button></div>
@@ -1280,10 +1471,18 @@ function openMemberForm(id){
       ${POSITIONS.map(p=>`<div class="chip ${m&&m.position===p?'active':''}" data-val="${p}">${p}</div>`).join('')}
     </div>
 
-    <label>직책 ${roleFullyLocked ? '(회장·고문 해임은 아래 절차로만 가능)' : (canEditRoleAndDues?'(회장·고문은 아래 신청 절차로만 지정 가능)':'(집행부만 변경 가능)')}</label>
+    <label>직책 ${roleFullyLocked ? '(회장·고문 해임은 아래 절차로만 가능)' : (canEditRoleAndDues?'(회장·고문은 아래 신청 절차로만 지정 · 여러 직책 동시 선택 가능)':'(집행부만 변경 가능)')}</label>
     <div class="chip-select" id="f_role">
-      ${ROLES.map(r=>`<div class="chip ${(m?m.role:'회원')===r?'active':''} ${(!canEditRoleAndDues||COUNCIL_ROLES.includes(r)||roleFullyLocked)?'chip-locked':''}" data-val="${r}" ${COUNCIL_ROLES.includes(r)?'data-council="1"':''}>${r}</div>`).join('')}
+      ${ROLES.filter(r=>r!=='회원').map(r=>{
+        const isPractical = PRACTICAL_EXEC_ROLES.includes(r);
+        const locked = !canEditRoleAndDues || COUNCIL_ROLES.includes(r) || roleFullyLocked || (isPractical && !canEditPracticalRoles);
+        return `<div class="chip ${(m?hasRole(m,r):false)?'active':''} ${locked?'chip-locked':''}" data-val="${r}" ${COUNCIL_ROLES.includes(r)?'data-council="1"':''} ${isPractical?'data-practical="1"':''}>${r}</div>`;
+      }).join('')}
     </div>
+    ${canEditPracticalRoles ? `<div style="font-size:10.5px; color:var(--chalk-dim); margin-top:4px;">부회장·감독·코치·총무·회계 임명·해임은 회장은 단독으로, 고문은 고문 전원 동의로 가능해요 (변경 시 관리자 PIN 확인).</div>`
+      : (canEditRoleAndDues && !roleFullyLocked && !hasPendingPracticalReq ? `<div style="font-size:10.5px; color:var(--chalk-dim); margin-top:4px;">부회장·감독·코치·총무·회계 임명·해임은 회장 또는 고문만 할 수 있어요.</div>` : '')}
+
+    ${m ? renderPracticalRoleRequestSection(m) : ''}
 
     ${canEditRoleAndDues ? `
     <label>이번 달(${mk}) 회비 납부</label>
@@ -1293,7 +1492,7 @@ function openMemberForm(id){
     </div>` : ''}
 
     ${(m && isSelf(m.id) && m.status!=='pending') ? renderLeaderRequestSection(m) : ''}
-    ${(m && isExec() && !isSelf(m.id) && COUNCIL_ROLES.includes(m.role)) ? renderRemovalSection(m) : ''}
+    ${(m && isExec() && !isSelf(m.id) && (m.roles||[]).some(r=>COUNCIL_ROLES.includes(r))) ? renderRemovalSection(m) : ''}
 
     <div class="card" style="padding:12px 14px; margin-top:14px;">
       <div style="font-size:11.5px; color:var(--chalk-dim); line-height:1.6; margin-bottom:8px;">
@@ -1323,11 +1522,10 @@ function openMemberForm(id){
 
   bindChipGroup('f_position');
   if(canEditRoleAndDues){
-    // 회장/고문 칩은 잠금(신청 절차 전용) - 나머지 직책 칩만 클릭 가능
+    // 회장/고문 칩은 잠금(신청 절차 전용) - 나머지 직책 칩은 겸직 가능하도록 다중 토글
     document.querySelectorAll('#f_role .chip:not(.chip-locked)').forEach(chip=>{
       chip.addEventListener('click', ()=>{
-        document.querySelectorAll('#f_role .chip').forEach(c=>c.classList.remove('active'));
-        chip.classList.add('active');
+        chip.classList.toggle('active');
       });
     });
     bindChipGroup('f_dues');
@@ -1349,28 +1547,54 @@ function openMemberForm(id){
     if(!privacyConsent){ showToast('개인정보 수집·이용 동의가 필요해요'); return; }
 
     if(m){
+      migrateRoles(m);
+      const councilRoles = m.roles.filter(r=>COUNCIL_ROLES.includes(r));
+      const currentPracticalRoles = m.roles.filter(r=>PRACTICAL_EXEC_ROLES.includes(r));
+      const currentOtherRoles = m.roles.filter(r=>!COUNCIL_ROLES.includes(r) && !PRACTICAL_EXEC_ROLES.includes(r));
+      let newOtherRoles = currentOtherRoles;
+      let rolesToAdd = [], rolesToRemove = [];
+      if(canEditRoleAndDues){
+        newOtherRoles = Array.from(document.querySelectorAll('#f_role .chip.active:not([data-council="1"]):not([data-practical="1"])')).map(c=>c.dataset.val);
+        if(canEditPracticalRoles){
+          const newPracticalRoles = Array.from(document.querySelectorAll('#f_role .chip.active[data-practical="1"]')).map(c=>c.dataset.val);
+          rolesToAdd = newPracticalRoles.filter(r=>!currentPracticalRoles.includes(r));
+          rolesToRemove = currentPracticalRoles.filter(r=>!newPracticalRoles.includes(r));
+          if(rolesToAdd.length || rolesToRemove.length){
+            const ok = await requireAdminPin('실무 직책 변경');
+            if(!ok) return;
+          }
+        }
+      }
+      const prev = { name:m.name, birthYear:m.birthYear, region:m.region, regionDetail:m.regionDetail, phone:m.phone, position:m.position,
+        number:m.number, roles:[...m.roles], dues: m.dues ? {...m.dues} : m.dues, privacyConsent:m.privacyConsent, privacyConsentAt:m.privacyConsentAt };
       m.name = name; m.birthYear = birthYear?Number(birthYear):null; m.region = region||null; m.regionDetail = regionDetail||null;
       m.phone = phone; m.position = position;
       if(canEditRoleAndDues){
         m.number = number?Number(number):null;
-        m.role = getActiveChip('f_role') || m.role || '회원';
+        m.roles = [...councilRoles, ...currentPracticalRoles, ...newOtherRoles];
         m.dues = m.dues || {};
         m.dues[mk] = getActiveChip('f_dues') === 'paid';
       }
       m.privacyConsent = true;
       if(!m.privacyConsentAt) m.privacyConsentAt = new Date().toISOString();
+      const ok = await saveMembers();
+      if(!ok){ Object.assign(m, prev); renderAll(); return; }
+      if(rolesToAdd.length || rolesToRemove.length){
+        await proposePracticalRoleChange(m, rolesToAdd, rolesToRemove);
+      }
     }else{
       MEMBERS.push({
         id: uid('mem'), name, number: null, birthYear: birthYear?Number(birthYear):null, region: region||null, regionDetail: regionDetail||null,
-        phone, position, role: '회원',
+        phone, position, roles: [],
         status: 'pending',
         privacyConsent: true,
         privacyConsentAt: new Date().toISOString(),
         joinDate: new Date().toISOString().slice(0,10),
         dues: {}
       });
+      const ok = await saveMembers();
+      if(!ok){ MEMBERS.pop(); renderAll(); return; }
     }
-    await saveMembers();
     closeModal();
     renderAll();
     showToast(m ? '회원 정보를 수정했습니다' : '등록 신청이 완료됐어요. 회장 승인 후 활동 가능해요');
@@ -1381,8 +1605,10 @@ function openMemberForm(id){
     approveBtn.addEventListener('click', async ()=>{
       const ok = await requireAdminPin('회원 승인');
       if(!ok) return;
+      const prevStatus = m.status;
       m.status = 'active';
-      await saveMembers();
+      const saved = await saveMembers();
+      if(!saved){ m.status = prevStatus; renderAll(); return; }
       closeModal();
       renderAll();
       showToast(`${m.name} 회원을 승인했습니다`);
@@ -1393,8 +1619,10 @@ function openMemberForm(id){
   if(selfActivateBtn){
     selfActivateBtn.addEventListener('click', async ()=>{
       if(activeRoster().length > 0){ showToast('이미 활동 중인 회원이 있어서 승인이 필요해요'); renderAll(); return; }
+      const prevStatus = m.status;
       m.status = 'active';
-      await saveMembers();
+      const saved = await saveMembers();
+      if(!saved){ m.status = prevStatus; renderAll(); return; }
       closeModal();
       renderAll();
       showToast('최초 회원으로 활성화됐어요. 이제 회장/고문 신청도 가능해요');
@@ -1407,8 +1635,10 @@ function openMemberForm(id){
       if(!confirm(`${m.name} 회원을 삭제할까요?`)) return;
       const ok = await requireAdminPin('회원 삭제');
       if(!ok) return;
+      const prevMembers = MEMBERS;
       MEMBERS = MEMBERS.filter(x=>x.id!==m.id);
-      await saveMembers();
+      const saved = await saveMembers();
+      if(!saved){ MEMBERS = prevMembers; renderAll(); return; }
       closeModal();
       renderAll();
       showToast('회원을 삭제했습니다');
@@ -1556,8 +1786,10 @@ async function deleteMatch(m){
   if(!confirm('이 경기를 삭제할까요?')) return;
   const ok = await requireAdminPin('경기 삭제');
   if(!ok) return;
+  const prevMatches = MATCHES;
   MATCHES = MATCHES.filter(x=>x.id!==m.id);
-  await saveMatches();
+  const saved = await saveMatches();
+  if(!saved){ MATCHES = prevMatches; renderAll(); return; }
   renderAll();
   showToast('경기를 삭제했습니다');
 }
@@ -1621,7 +1853,8 @@ function openMatchForm(){
       quarters: [],
       result: null
     });
-    await saveMatches();
+    const ok = await saveMatches();
+    if(!ok){ MATCHES.pop(); renderAll(); return; }
     closeModal();
     renderAll();
     showToast('경기를 등록했습니다');
@@ -1700,6 +1933,7 @@ function openExternalTeamForm(m){
   const attending = roster.filter(mem => rsvpStatus(m, mem.id) === 'yes');
   const pool = attending.length ? attending : roster;
   if(!m.teams) m.teams = {A:[], B:[]};
+  const teamsSnapshot = JSON.parse(JSON.stringify(m.teams));
 
   const html = `
     <div class="modal-head"><h3>팀 편성</h3><button class="close-x" onclick="closeModal()">✕</button></div>
@@ -1770,7 +2004,8 @@ function openExternalTeamForm(m){
   });
 
   document.getElementById('btnSaveTeams').addEventListener('click', async ()=>{
-    await saveMatches();
+    const ok = await saveMatches();
+    if(!ok){ m.teams = teamsSnapshot; renderAll(); return; }
     closeModal();
     showToast('팀 편성을 저장했습니다');
   });
@@ -1781,6 +2016,8 @@ function openInternalTeamForm(m){
   const attendingNow = roster.filter(mem => rsvpStatus(m, mem.id) === 'yes');
   const pool = attendingNow.length ? attendingNow : roster;
   if(!m.teams || !m.teams.orange) m.teams = {orange:[], yellow:[], black:[]};
+  const teamsSnapshot = JSON.parse(JSON.stringify(m.teams));
+  const teamModeSnapshot = m.teamMode;
 
   const cutoff = fridayCutoff(m.date);
   const attendingByCutoff = roster.filter(mem=>{
@@ -1881,7 +2118,8 @@ function openInternalTeamForm(m){
   });
 
   document.getElementById('btnSaveTeams3').addEventListener('click', async ()=>{
-    await saveMatches();
+    const ok = await saveMatches();
+    if(!ok){ m.teams = teamsSnapshot; m.teamMode = teamModeSnapshot; renderAll(); return; }
     closeModal();
     showToast(`팀 편성을 저장했습니다 (${m.teamMode}팀)`);
   });
@@ -1893,6 +2131,9 @@ const MAX_QUARTERS = 10;
 function openResultForm(m){
   if(!m.quarters) m.quarters = [];
   if(!m.result) m.result = { mom:null };
+  const quartersSnapshot = JSON.parse(JSON.stringify(m.quarters));
+  const resultSnapshot = JSON.parse(JSON.stringify(m.result));
+  const statusSnapshot = m.status;
   const isInternal = m.matchType === 'internal';
   const roster = activeRoster();
   const attending = roster.filter(mem => rsvpStatus(m, mem.id) === 'yes');
@@ -2024,7 +2265,8 @@ function openResultForm(m){
   document.getElementById('btnSaveResult').addEventListener('click', async ()=>{
     m.result.mom = document.getElementById('f_mom').value || null;
     m.status = 'done';
-    await saveMatches();
+    const ok = await saveMatches();
+    if(!ok){ m.quarters = quartersSnapshot; m.result = resultSnapshot; m.status = statusSnapshot; renderAll(); return; }
     closeModal();
     renderAll();
     showToast('경기 결과를 저장했습니다');
@@ -2173,8 +2415,10 @@ function renderDuesSettlement(){
         if(!isExec()){ showToast('지출 삭제는 집행부만 할 수 있어요'); return; }
         const ok = await requireAdminPin('지출 내역 삭제');
         if(!ok) return;
+        const prevExpenses = EXPENSES;
         EXPENSES = EXPENSES.filter(x=>x.id!==btn.dataset.expdel);
-        await saveExpenses();
+        const saved = await saveExpenses();
+        if(!saved){ EXPENSES = prevExpenses; renderDuesSettlement(); return; }
         renderDuesSettlement();
         showToast('지출 내역을 삭제했습니다');
       });
@@ -2217,7 +2461,8 @@ function openExpenseForm(){
       amount,
       note: document.getElementById('f_expNote').value.trim()
     });
-    await saveExpenses();
+    const ok = await saveExpenses();
+    if(!ok){ EXPENSES.pop(); return; }
     closeModal();
     renderDuesSettlement();
     showToast('지출 내역을 저장했습니다');
@@ -2241,9 +2486,11 @@ function openDuesSettingsForm(){
   document.getElementById('overlay').classList.add('active');
 
   document.getElementById('btnSaveDuesSettings').addEventListener('click', async ()=>{
+    const prevSettings = {...SETTINGS};
     SETTINGS.monthlyDues = Number(document.getElementById('f_monthlyDues').value) || 0;
     SETTINGS.adminPin = document.getElementById('f_adminPin').value.trim();
-    await saveSettings();
+    const ok = await saveSettings();
+    if(!ok){ SETTINGS = prevSettings; renderAll(); return; }
     closeModal();
     renderAll();
     showToast('회비 설정을 저장했습니다');
@@ -2271,7 +2518,7 @@ function inRange(dateStr, range){
 
 function computePeriodMemberStats(range){
   const stats = {};
-  activeRoster().forEach(m=> stats[m.id] = { id:m.id, name:m.name, number:m.number, role:m.role, apps:0, goals:0, assists:0, saves:0, mom:0, rsvpYes:0 });
+  activeRoster().forEach(m=> stats[m.id] = { id:m.id, name:m.name, number:m.number, role:roleLabel(m), apps:0, goals:0, assists:0, saves:0, mom:0, rsvpYes:0 });
   MATCHES.forEach(m=>{
     if(!inRange(m.date, range)) return;
     Object.keys(m.rsvp||{}).forEach(id=>{ if(stats[id] && rsvpStatus(m,id)==='yes') stats[id].rsvpYes++; });
