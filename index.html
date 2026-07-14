@@ -111,6 +111,7 @@
     margin-bottom:10px;
   }
   .stat-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:4px;}
+  #duesSummaryGrid{grid-template-columns:repeat(4,1fr);}
   .stat-box{
     background:rgba(0,0,0,0.18); border:1px solid var(--line-white); border-radius:12px;
     padding:12px 8px; text-align:center;
@@ -173,6 +174,7 @@
     background:rgba(0,0,0,0.2); color:var(--chalk-dim); cursor:pointer;
   }
   .chip.active{background:var(--gold); color:var(--ink); border-color:var(--gold); font-weight:600;}
+  .chip.chip-locked{cursor:default; opacity:0.55;}
 
   /* ---------- MEMBER LIST ---------- */
   .member-row{
@@ -334,7 +336,10 @@
         <small id="memberCountLabel">회원 0명</small>
       </div>
     </div>
-    <div class="sync-pill"><span class="sync-dot"></span>공유 저장됨</div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <button id="btnWhoAmI" title="본인 확인" style="width:30px;height:30px;font-size:13px;border-radius:8px;background:rgba(255,255,255,0.08);border:1px solid var(--line-white);color:var(--chalk);cursor:pointer;">👤</button>
+      <div class="sync-pill"><span class="sync-dot"></span>공유 저장됨</div>
+    </div>
   </header>
 
   <main>
@@ -362,6 +367,7 @@
 
     <!-- ================= 회원 ================= -->
     <section class="screen" id="screen-members">
+      <div id="leaderRequestBanner"></div>
       <div class="search-bar">
         <input type="text" id="memberSearch" placeholder="이름 또는 등번호 검색">
       </div>
@@ -381,12 +387,21 @@
     <section class="screen" id="screen-stats">
       <h2 class="section-title"><span class="num">·</span>시즌 랭킹</h2>
       <div class="lb-tabs">
-        <button class="chip active" data-lb="goals">⚽ 득점</button>
+        <button class="chip active" data-lb="apps">📅 출석</button>
+        <button class="chip" data-lb="goals">⚽ 득점</button>
         <button class="chip" data-lb="assists">🅰️ 도움</button>
-        <button class="chip" data-lb="apps">📅 출석</button>
+        <button class="chip" data-lb="saves">🧤 방어</button>
         <button class="chip" data-lb="mom">🏅 MOM</button>
       </div>
       <div class="card" id="leaderboard"></div>
+
+      <div class="settle-head" style="margin-top:22px;">
+        <h2 class="section-title" style="margin:0;"><span class="num">·</span>활동 리포트</h2>
+      </div>
+      <div class="card" style="padding:14px;">
+        <div style="font-size:11.5px; color:var(--chalk-dim); margin-bottom:10px;">기간을 선택해서 팀 활동·예산집행·개인별 기록을 담은 리포트 파일을 만들 수 있어요.</div>
+        <button class="btn btn-primary btn-block" id="btnOpenReport">📄 리포트 생성</button>
+      </div>
     </section>
 
     <!-- ================= 회비결산 ================= -->
@@ -401,10 +416,17 @@
 
       <div class="card" style="padding:10px 12px; margin-top:10px;">
         <div class="ledger-row head">
-          <span>월</span><span style="text-align:right;">수입(납부)</span><span style="text-align:right;">지출(경기비)</span><span style="text-align:right;">잔액</span>
+          <span>월</span><span style="text-align:right;">수입(납부)</span><span style="text-align:right;">지출</span><span style="text-align:right;">잔액</span>
         </div>
         <div id="duesLedger"></div>
       </div>
+
+      <div class="settle-head" style="margin-top:22px;">
+        <h2 class="section-title" style="margin:0;"><span class="num">·</span>지출내역</h2>
+        <button class="gear-btn" id="btnAddExpense" title="지출 추가">+</button>
+      </div>
+      <div class="card" id="expenseCategoryGrid" style="padding:10px 12px; margin-bottom:10px;"></div>
+      <div class="card" style="padding:6px 12px;" id="expenseList"></div>
     </section>
 
   </main>
@@ -430,14 +452,79 @@
    ============================================================ */
 let MEMBERS = [];
 let MATCHES = [];
-let SETTINGS = { monthlyDues: 30000 };
+let EXPENSES = [];
+let SETTINGS = { monthlyDues: 30000, adminPin: '' };
 let currentScreen = 'home';
-let lbMode = 'goals';
+let lbMode = 'apps';
 let detailYear = new Date().getFullYear();
 let duesSettleYear = new Date().getFullYear();
 
-const POSITIONS = ['GK','DF','MF','FW'];
-const ROLES = ['회원','주장','부주장','총무','회계'];
+const POSITIONS = ['골레이','픽소','아라','피보'];
+const ROLES = ['회원','회장','부회장','감독','코치','고문','주장','부주장','총무','회계'];
+const REGIONS = ['서울','경기','인천','강원','충북','충남','대전','세종','전북','전남','광주','경북','경남','대구','부산','울산','제주','기타'];
+const EXPENSE_CATEGORIES = ['경기장','식사','간식','용품구입','기타'];
+const EXEC_ROLES = ['회장','고문','부회장','감독','코치','총무','회계'];
+const COUNCIL_ROLES = ['회장','고문']; // 상호 승인으로만 취득 가능한 최고 의결권 역할
+
+function councilMembers(){
+  return activeRoster().filter(m => COUNCIL_ROLES.includes(m.role));
+}
+const MY_ID_KEY = 'gsfc_my_member_id';
+
+function getMyMemberId(){
+  try{ return localStorage.getItem(MY_ID_KEY) || null; }catch(e){ return null; }
+}
+function setMyMemberId(id){
+  try{ if(id) localStorage.setItem(MY_ID_KEY, id); else localStorage.removeItem(MY_ID_KEY); }catch(e){}
+}
+function currentMember(){
+  const id = getMyMemberId();
+  return id ? memberById(id) : null;
+}
+function isExec(){
+  const me = currentMember();
+  return !!(me && me.status==='active' && EXEC_ROLES.includes(me.role));
+}
+function isSelf(memberId){
+  const me = currentMember();
+  return !!(me && me.id === memberId);
+}
+function updateWhoAmILabel(){
+  const btn = document.getElementById('btnWhoAmI');
+  if(!btn) return;
+  const me = currentMember();
+  btn.textContent = me ? (me.name.charAt(0)) : '👤';
+  btn.title = me ? `${me.name}${isExec()?' · 집행부':''} (본인 확인 변경)` : '본인 확인';
+}
+function openWhoAmIPicker(){
+  const activeMembers = [...MEMBERS].sort((a,b)=>(a.number||999)-(b.number||999));
+  const me = currentMember();
+  const html = `
+    <div class="modal-head"><h3>본인 확인</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="match-meta" style="margin-bottom:10px; line-height:1.6;">
+      본인이 누구인지 선택해두면, 이후 본인 정보 수정이나 본인 경기기록 입력이 가능해져요.<br>
+      집행부(회장·부회장·감독·코치·총무·회계)로 선택하면 전체 데이터 입력 권한이 열려요.
+    </div>
+    <select id="f_whoami">
+      <option value="">선택 안함</option>
+      ${activeMembers.map(m=>`<option value="${m.id}" ${me&&me.id===m.id?'selected':''}>${escapeHTML(m.name)}${EXEC_ROLES.includes(m.role)&&m.status!=='pending'?' ('+m.role+')':''}${m.status==='pending'?' (승인대기)':''}</option>`).join('')}
+    </select>
+    <div class="modal-foot">
+      <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary btn-block" id="btnSaveWhoAmI">확인</button>
+    </div>
+  `;
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('overlay').classList.add('active');
+  document.getElementById('btnSaveWhoAmI').addEventListener('click', ()=>{
+    const val = document.getElementById('f_whoami').value;
+    setMyMemberId(val || null);
+    updateWhoAmILabel();
+    closeModal();
+    renderAll();
+    showToast(val ? '본인 확인이 설정됐어요' : '본인 확인이 해제됐어요');
+  });
+}
 
 /* ============================================================
    Supabase 저장소 연동 (window.storage 대체)
@@ -450,7 +537,11 @@ async function dbGet(key){
     `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}&select=value`,
     { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
   );
-  if(!res.ok) throw new Error('supabase get failed: ' + res.status);
+  if(!res.ok){
+    let detail = '';
+    try{ detail = (await res.json()).message || ''; }catch(e){}
+    throw new Error(`(${res.status}) ${detail || res.statusText}`);
+  }
   const rows = await res.json();
   if(!rows.length || rows[0].value === null || rows[0].value === undefined) return null;
   return { key, value: JSON.stringify(rows[0].value) };
@@ -468,8 +559,31 @@ async function dbSet(key, valueStr){
     },
     body: JSON.stringify([{ key, value: parsed, updated_at: new Date().toISOString() }])
   });
-  if(!res.ok) throw new Error('supabase set failed: ' + res.status);
+  if(!res.ok){
+    let detail = '';
+    try{ detail = (await res.json()).message || ''; }catch(e){}
+    throw new Error(`(${res.status}) ${detail || res.statusText}`);
+  }
   return { key, value: valueStr };
+}
+
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+
+// 네트워크 순단 등 일시적 오류에 대비해 한 번 자동 재시도 후, 그래도 실패하면
+// 화면에 실제 원인(상태코드/메시지)을 보여줘서 어디서 막혔는지 바로 알 수 있게 함
+async function dbSetWithRetry(key, valueStr, label){
+  const delays = [0, 800, 2000]; // 즉시 → 0.8초 후 → 2초 후, 총 3번 시도
+  let lastErr = null;
+  for(let i=0; i<delays.length; i++){
+    if(delays[i]) await sleep(delays[i]);
+    try{
+      await dbSet(key, valueStr);
+      return true;
+    }catch(e){ lastErr = e; }
+  }
+  console.error('저장 실패:', label, lastErr);
+  showToast(`저장 실패(${label}): ${lastErr.message} — 저장 안 됨, 다시 시도해주세요`.slice(0,90));
+  return false;
 }
 
 function uid(prefix){ return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -480,45 +594,88 @@ async function loadData(){
   try{
     const m = await dbGet('members');
     MEMBERS = m ? JSON.parse(m.value) : [];
-  }catch(e){ MEMBERS = []; showToast('회원 데이터를 불러오지 못했어요'); }
+  }catch(e){ MEMBERS = []; showToast('회원 데이터를 불러오지 못했어요: ' + e.message); }
   try{
     const mt = await dbGet('matches');
     MATCHES = mt ? JSON.parse(mt.value) : [];
-  }catch(e){ MATCHES = []; showToast('경기 데이터를 불러오지 못했어요'); }
+  }catch(e){ MATCHES = []; showToast('경기 데이터를 불러오지 못했어요: ' + e.message); }
+  try{
+    const ex = await dbGet('expenses');
+    EXPENSES = ex ? JSON.parse(ex.value) : [];
+  }catch(e){ EXPENSES = []; }
   try{
     const st = await dbGet('settings');
-    SETTINGS = st ? JSON.parse(st.value) : { monthlyDues: 30000 };
-  }catch(e){ SETTINGS = { monthlyDues: 30000 }; }
+    SETTINGS = st ? JSON.parse(st.value) : { monthlyDues: 30000, adminPin: '' };
+    if(SETTINGS.adminPin === undefined) SETTINGS.adminPin = '';
+  }catch(e){ SETTINGS = { monthlyDues: 30000, adminPin: '' }; }
   updateFabVisibility();
   renderAll();
 }
 async function saveMembers(){
-  try{ await dbSet('members', JSON.stringify(MEMBERS)); }
-  catch(e){ showToast('저장 실패 - 다시 시도해주세요'); }
+  return await dbSetWithRetry('members', JSON.stringify(MEMBERS), '회원');
 }
 async function saveMatches(){
-  try{ await dbSet('matches', JSON.stringify(MATCHES)); }
-  catch(e){ showToast('저장 실패 - 다시 시도해주세요'); }
+  return await dbSetWithRetry('matches', JSON.stringify(MATCHES), '경기');
 }
 async function saveSettings(){
-  try{ await dbSet('settings', JSON.stringify(SETTINGS)); }
-  catch(e){ showToast('저장 실패 - 다시 시도해주세요'); }
+  return await dbSetWithRetry('settings', JSON.stringify(SETTINGS), '설정');
+}
+async function saveExpenses(){
+  return await dbSetWithRetry('expenses', JSON.stringify(EXPENSES), '지출');
+}
+
+/* ---------- 관리자 PIN 확인 ---------- */
+function requireAdminPin(actionLabel){
+  return new Promise((resolve)=>{
+    if(!SETTINGS.adminPin){ resolve(true); return; }
+    const html = `
+      <div class="modal-head"><h3>관리자 확인</h3><button class="close-x" id="pinCancelX">✕</button></div>
+      <div class="match-meta" style="margin-bottom:10px;">"${actionLabel}" 작업은 관리자 PIN이 필요해요.</div>
+      <label>PIN 번호</label>
+      <input type="password" id="f_pinInput" inputmode="numeric" maxlength="12" placeholder="PIN 입력">
+      <div class="modal-foot">
+        <button class="btn btn-ghost btn-block" id="pinCancelBtn">취소</button>
+        <button class="btn btn-primary btn-block" id="pinConfirmBtn">확인</button>
+      </div>
+    `;
+    document.getElementById('modalBody').innerHTML = html;
+    document.getElementById('overlay').classList.add('active');
+    const finish = (result)=>{ closeModal(); resolve(result); };
+    document.getElementById('pinCancelX').addEventListener('click', ()=>finish(false));
+    document.getElementById('pinCancelBtn').addEventListener('click', ()=>finish(false));
+    const confirmBtn = document.getElementById('pinConfirmBtn');
+    const input = document.getElementById('f_pinInput');
+    const tryConfirm = ()=>{
+      if(input.value === SETTINGS.adminPin) finish(true);
+      else showToast('PIN이 일치하지 않아요');
+    };
+    confirmBtn.addEventListener('click', tryConfirm);
+    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') tryConfirm(); });
+    input.focus();
+  });
 }
 
 /* ============================================================
    연도 / 출석 / 회비 계산 헬퍼
    ============================================================ */
 function availableYears(){
-  const years = new Set([new Date().getFullYear()]);
+  const thisYear = new Date().getFullYear();
+  const years = new Set([thisYear, thisYear+1]); // 선납 등록을 위해 다음 해도 항상 선택 가능하게
   MATCHES.forEach(m=>{ if(m.date) years.add(new Date(m.date).getFullYear()); });
+  MEMBERS.forEach(mem=>{
+    Object.keys(mem.dues||{}).forEach(key=>{
+      const y = Number(key.split('-')[0]);
+      if(y) years.add(y);
+    });
+  });
   return Array.from(years).sort((a,b)=>a-b);
 }
 function attendedIdsForMatch(m){
   const ids = new Set();
-  (m.teams?.A||[]).forEach(id=>ids.add(id));
-  (m.teams?.B||[]).forEach(id=>ids.add(id));
+  const t = m.teams || {};
+  Object.keys(t).forEach(k=> (t[k]||[]).forEach(id=>ids.add(id)));
   if(ids.size===0){
-    Object.keys(m.rsvp||{}).forEach(id=>{ if(m.rsvp[id]==='yes') ids.add(id); });
+    Object.keys(m.rsvp||{}).forEach(id=>{ if(rsvpStatus(m,id)==='yes') ids.add(id); });
   }
   return ids;
 }
@@ -531,14 +688,25 @@ function memberYearStats(memberId, year){
 }
 function monthSettlement(year, month){
   const key = year + '-' + String(month).padStart(2,'0');
-  const paidCount = MEMBERS.filter(m => m.dues && m.dues[key]).length;
+  const paidCount = activeRoster().filter(m => m.dues && m.dues[key]).length;
   const income = paidCount * (Number(SETTINGS.monthlyDues)||0);
-  const expense = MATCHES.filter(m=>{
+  const matchExpense = MATCHES.filter(m=>{
     if(!m.date || !m.cost) return false;
     const d = new Date(m.date);
     return d.getFullYear()===year && (d.getMonth()+1)===month;
   }).reduce((sum,m)=> sum + (Number(m.cost)||0), 0);
-  return { month, paidCount, income, expense, balance: income - expense };
+  const monthExpenses = EXPENSES.filter(x=>{
+    if(!x.date) return false;
+    const d = new Date(x.date);
+    return d.getFullYear()===year && (d.getMonth()+1)===month;
+  });
+  const categorizedExpense = monthExpenses.reduce((sum,x)=> sum + (Number(x.amount)||0), 0);
+  const expense = matchExpense + categorizedExpense;
+  const byCategory = {};
+  EXPENSE_CATEGORIES.forEach(c=> byCategory[c] = 0);
+  monthExpenses.forEach(x=>{ byCategory[x.category] = (byCategory[x.category]||0) + (Number(x.amount)||0); });
+  if(matchExpense>0) byCategory['경기장'] = (byCategory['경기장']||0) + matchExpense;
+  return { month, paidCount, income, expense, balance: income - expense, byCategory };
 }
 
 function showToast(msg){
@@ -564,10 +732,12 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
   });
 });
 
-document.getElementById('fabBtn').addEventListener('click', ()=>{
+document.getElementById('btnWhoAmI').addEventListener('click', openWhoAmIPicker);
+
+document.getElementById('fabBtn').addEventListener('click', async ()=>{
   if(currentScreen === 'members') openMemberForm();
-  else if(currentScreen === 'matches') openMatchForm();
-  else if(currentScreen === 'dues') openDuesSettingsForm();
+  else if(currentScreen === 'matches'){ if(!isExec()){ showToast('경기 등록은 집행부만 할 수 있어요'); return; } openMatchForm(); }
+  else if(currentScreen === 'dues'){ if(!isExec()){ showToast('회비 설정은 집행부만 할 수 있어요'); return; } const ok = await requireAdminPin('회비 설정 변경'); if(ok) openDuesSettingsForm(); }
   else if(currentScreen === 'stats') showToast('회원/경기 탭에서 + 버튼을 눌러보세요');
   else openMemberForm();
 });
@@ -578,7 +748,16 @@ function updateFabVisibility(){
   fab.textContent = '+';
 }
 
-document.getElementById('btnDuesSettings').addEventListener('click', openDuesSettingsForm);
+document.getElementById('btnDuesSettings').addEventListener('click', async ()=>{
+  if(!isExec()){ showToast('회비 설정은 집행부만 할 수 있어요'); return; }
+  const ok = await requireAdminPin('회비 설정 변경');
+  if(ok) openDuesSettingsForm();
+});
+document.getElementById('btnAddExpense').addEventListener('click', async ()=>{
+  if(!isExec()){ showToast('지출 등록은 집행부만 할 수 있어요'); return; }
+  const ok = await requireAdminPin('지출 내역 추가');
+  if(ok) openExpenseForm();
+});
 
 function closeModal(){ document.getElementById('overlay').classList.remove('active'); document.getElementById('modalBody').innerHTML=''; }
 document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
@@ -587,7 +766,8 @@ document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.
    렌더링 총괄
    ============================================================ */
 function renderAll(){
-  document.getElementById('memberCountLabel').textContent = `회원 ${MEMBERS.length}명`;
+  document.getElementById('memberCountLabel').textContent = `회원 ${MEMBERS.filter(m=>m.status!=='pending').length}명`;
+  updateWhoAmILabel();
   if(currentScreen==='home') renderHome();
   if(currentScreen==='members') renderMemberList();
   if(currentScreen==='matches') renderMatches();
@@ -609,9 +789,9 @@ function renderHome(){
     bindMatchCardEvents(box);
   }
 
-  document.getElementById('homeMemberCount').textContent = MEMBERS.length;
+  document.getElementById('homeMemberCount').textContent = activeRoster().length;
   const mk = todayMonthKey();
-  const unpaid = MEMBERS.filter(m => !(m.dues && m.dues[mk])).length;
+  const unpaid = activeRoster().filter(m => !(m.dues && m.dues[mk])).length;
   document.getElementById('homeUnpaidCount').textContent = unpaid;
   document.getElementById('homeMatchCount').textContent = MATCHES.filter(m=>m.status==='done').length;
 
@@ -628,13 +808,181 @@ function renderHome(){
    회원 관리
    ============================================================ */
 function memberById(id){ return MEMBERS.find(m=>m.id===id); }
+function activeRoster(){ return MEMBERS.filter(m=>m.status!=='pending'); }
+
+async function applyForLeaderRole(m, targetRole){
+  if(m.pendingLeaderRequest){ showToast('이미 신청이 진행 중이에요'); return; }
+  const council = councilMembers();
+  if(council.length === 0){
+    // 최초의 회장/고문은 승인 없이 스스로 지정
+    m.role = targetRole;
+    await saveMembers();
+    renderAll();
+    showToast(`최초 ${targetRole}(으)로 지정되었습니다`);
+    return;
+  }
+  m.pendingLeaderRequest = {
+    targetRole,
+    requiredApproverIds: council.map(c=>c.id),
+    approvedBy: [],
+    appliedAt: new Date().toISOString()
+  };
+  await saveMembers();
+  renderAll();
+  showToast(`${targetRole} 신청을 접수했어요. 기존 회장·고문 전원 승인이 필요해요 (0/${council.length})`);
+}
+
+async function approveLeaderRequest(m){
+  const me = currentMember();
+  if(!me){ showToast('본인 확인(👤)을 먼저 해주세요'); return; }
+  const req = m.pendingLeaderRequest;
+  if(!req){ return; }
+  if(!req.requiredApproverIds.includes(me.id)){ showToast('이 신청의 승인 권한이 없어요'); return; }
+  if(req.approvedBy.includes(me.id)){ showToast('이미 승인하셨어요'); return; }
+  req.approvedBy.push(me.id);
+  if(req.approvedBy.length >= req.requiredApproverIds.length){
+    m.role = req.targetRole;
+    delete m.pendingLeaderRequest;
+    await saveMembers();
+    renderAll();
+    showToast(`${m.name}님이 ${m.role}(으)로 승인·지정되었습니다`);
+  }else{
+    await saveMembers();
+    renderAll();
+    showToast(`승인했어요 (${req.approvedBy.length}/${req.requiredApproverIds.length})`);
+  }
+}
+
+async function cancelLeaderRequest(m){
+  delete m.pendingLeaderRequest;
+  await saveMembers();
+  renderAll();
+  showToast('신청을 취소했어요');
+}
+
+async function proposeRemoval(m){
+  if(!COUNCIL_ROLES.includes(m.role)){ return; }
+  if(m.pendingRemovalRequest){ showToast('이미 해임 절차가 진행 중이에요'); return; }
+  const me = currentMember();
+  if(!me){ showToast('본인 확인(👤)을 먼저 해주세요'); return; }
+  const others = councilMembers().filter(c => c.id !== m.id);
+  if(others.length === 0){
+    showToast('다른 회장·고문이 없어서 해임 절차를 진행할 수 없어요. 본인이 직접 직책을 변경해야 해요.');
+    return;
+  }
+  m.pendingRemovalRequest = {
+    requiredApproverIds: others.map(o=>o.id),
+    approvedBy: [],
+    proposedBy: me.id,
+    appliedAt: new Date().toISOString()
+  };
+  await saveMembers();
+  renderAll();
+  showToast(`해임 절차를 시작했어요. 본인 외 회장·고문 전원 동의가 필요해요 (0/${others.length})`);
+}
+
+async function approveRemoval(m){
+  const me = currentMember();
+  if(!me){ showToast('본인 확인(👤)을 먼저 해주세요'); return; }
+  const req = m.pendingRemovalRequest;
+  if(!req) return;
+  if(!req.requiredApproverIds.includes(me.id)){ showToast('이 요청의 승인 권한이 없어요'); return; }
+  if(req.approvedBy.includes(me.id)){ showToast('이미 동의하셨어요'); return; }
+  req.approvedBy.push(me.id);
+  if(req.approvedBy.length >= req.requiredApproverIds.length){
+    const oldRole = m.role;
+    m.role = '회원';
+    delete m.pendingRemovalRequest;
+    await saveMembers();
+    renderAll();
+    showToast(`${m.name}님의 ${oldRole} 직책이 해임되었습니다`);
+  }else{
+    await saveMembers();
+    renderAll();
+    showToast(`동의했어요 (${req.approvedBy.length}/${req.requiredApproverIds.length})`);
+  }
+}
+
+async function cancelRemoval(m){
+  delete m.pendingRemovalRequest;
+  await saveMembers();
+  renderAll();
+  showToast('해임 절차를 취소했어요');
+}
+
+function rsvpStatus(m, mid){
+  const r = m.rsvp ? m.rsvp[mid] : null;
+  if(!r) return 'maybe';
+  return typeof r === 'string' ? r : r.value;
+}
+function rsvpAt(m, mid){
+  const r = m.rsvp ? m.rsvp[mid] : null;
+  if(!r || typeof r === 'string') return null;
+  return r.at || null;
+}
+function setRsvp(m, mid, value){
+  m.rsvp = m.rsvp || {};
+  m.rsvp[mid] = { value, at: new Date().toISOString() };
+}
+function fridayCutoff(dateStr){
+  const matchDate = new Date(dateStr + 'T18:00:00');
+  const dow = matchDate.getDay(); // 0=Sun..6=Sat, Fri=5
+  const daysBack = (dow - 5 + 7) % 7;
+  const cutoff = new Date(matchDate);
+  cutoff.setDate(matchDate.getDate() - daysBack);
+  cutoff.setHours(18,0,0,0);
+  return cutoff;
+}
+
+function renderLeaderRequestBanner(){
+  const el = document.getElementById('leaderRequestBanner');
+  if(!el) return;
+  const me = currentMember();
+  const applicants = MEMBERS.filter(m => m.pendingLeaderRequest);
+  const myApprovals = me ? applicants.filter(m => m.pendingLeaderRequest.requiredApproverIds.includes(me.id) && !m.pendingLeaderRequest.approvedBy.includes(me.id)) : [];
+  const removals = MEMBERS.filter(m => m.pendingRemovalRequest);
+  const myRemovalApprovals = me ? removals.filter(m => m.pendingRemovalRequest.requiredApproverIds.includes(me.id) && !m.pendingRemovalRequest.approvedBy.includes(me.id)) : [];
+
+  if(myApprovals.length === 0 && myRemovalApprovals.length === 0){ el.innerHTML = ''; return; }
+
+  el.innerHTML = `
+    <div class="card" style="padding:12px 14px; margin-bottom:12px; border-color:var(--gold);">
+      ${myApprovals.length ? `
+      <div style="font-size:12px; color:var(--gold); font-weight:600; margin-bottom:8px;">⏳ 회장·고문 승인 요청 (${myApprovals.length}건)</div>
+      ${myApprovals.map(m=>`
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0;">
+          <div style="font-size:13px;">${escapeHTML(m.name)} → <b>${m.pendingLeaderRequest.targetRole}</b> (${m.pendingLeaderRequest.approvedBy.length}/${m.pendingLeaderRequest.requiredApproverIds.length})</div>
+          <button class="btn btn-primary btn-sm" data-approve-id="${m.id}">승인</button>
+        </div>
+      `).join('')}` : ''}
+      ${myRemovalApprovals.length ? `
+      <div style="font-size:12px; color:#FF9B92; font-weight:600; margin:${myApprovals.length?'12px':'0'} 0 8px;">⚠️ 회장·고문 해임 동의 요청 (${myRemovalApprovals.length}건)</div>
+      ${myRemovalApprovals.map(m=>`
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0;">
+          <div style="font-size:13px;">${escapeHTML(m.name)} (${m.role}) 해임 (${m.pendingRemovalRequest.approvedBy.length}/${m.pendingRemovalRequest.requiredApproverIds.length})</div>
+          <button class="btn btn-danger btn-sm" data-remove-approve-id="${m.id}">동의</button>
+        </div>
+      `).join('')}` : ''}
+    </div>
+  `;
+  el.querySelectorAll('[data-approve-id]').forEach(btn=>{
+    btn.addEventListener('click', ()=> approveLeaderRequest(memberById(btn.dataset.approveId)));
+  });
+  el.querySelectorAll('[data-remove-approve-id]').forEach(btn=>{
+    btn.addEventListener('click', ()=> approveRemoval(memberById(btn.dataset.removeApproveId)));
+  });
+}
 
 function renderMemberList(){
+  renderLeaderRequestBanner();
   document.getElementById('memberListCount').textContent = MEMBERS.length;
   const q = (document.getElementById('memberSearch').value || '').trim().toLowerCase();
   const list = document.getElementById('memberList');
   let filtered = MEMBERS.filter(m => !q || m.name.toLowerCase().includes(q) || String(m.number).includes(q));
-  filtered = filtered.sort((a,b)=> (a.number||999)-(b.number||999));
+  filtered = filtered.sort((a,b)=> {
+    if((a.status==='pending') !== (b.status==='pending')) return a.status==='pending' ? -1 : 1;
+    return (a.number||999)-(b.number||999);
+  });
 
   if(MEMBERS.length===0){
     list.innerHTML = `<div class="empty"><div class="ball">👕</div><p>등록된 회원이 없습니다.<br>오른쪽 아래 + 버튼으로 회원을 추가해보세요.</p></div>`;
@@ -647,19 +995,24 @@ function renderMemberList(){
   const mk = todayMonthKey();
   list.innerHTML = filtered.map(m=>{
     const paid = m.dues && m.dues[mk];
+    const pending = m.status === 'pending';
     return `
-    <div class="member-row" data-id="${m.id}">
+    <div class="member-row" data-id="${m.id}" style="${pending?'opacity:0.75;':''}">
       <div class="jersey">${m.number ?? '-'}</div>
       <div class="member-info">
-        <div class="name">${escapeHTML(m.name)} ${m.role && m.role!=='회원' ? `<span class="role-tag">${m.role}</span>` : ''}</div>
-        <div class="sub">${m.position || '-'} · ${m.phone || '연락처 없음'}</div>
+        <div class="name">${escapeHTML(m.name)} ${pending ? `<span class="role-tag" style="background:rgba(193,68,60,0.18); color:#FF9B92;">승인대기</span>` : (m.role && m.role!=='회원' ? `<span class="role-tag">${m.role}</span>` : '')}</div>
+        <div class="sub">${m.position || '-'} · ${m.birthYear?m.birthYear+'년생':'-'} · ${m.region||'-'}${m.regionDetail?' '+escapeHTML(m.regionDetail):''}</div>
       </div>
-      <div class="dues-dot ${paid?'paid':'unpaid'}" title="${paid?'이번달 회비 납부':'이번달 회비 미납'}"></div>
+      ${pending ? '' : `<div class="dues-dot ${paid?'paid':'unpaid'}" title="${paid?'이번달 회비 납부':'이번달 회비 미납'}"></div>`}
     </div>`;
   }).join('');
 
   list.querySelectorAll('.member-row').forEach(row=>{
-    row.addEventListener('click', ()=> openMemberDetail(row.dataset.id));
+    const mem = memberById(row.dataset.id);
+    row.addEventListener('click', ()=>{
+      if(mem.status==='pending') openMemberForm(row.dataset.id);
+      else openMemberDetail(row.dataset.id);
+    });
   });
 }
 document.getElementById('memberSearch').addEventListener('input', renderMemberList);
@@ -676,7 +1029,7 @@ function openMemberDetail(id){
       <div class="jersey">${m.number ?? '-'}</div>
       <div>
         <div class="name">${escapeHTML(m.name)} ${m.role && m.role!=='회원' ? `<span class="role-tag">${m.role}</span>` : ''}</div>
-        <div class="sub">${m.position || '-'} · ${m.phone || '연락처 없음'}</div>
+        <div class="sub">${m.position || '-'} · ${m.birthYear?m.birthYear+'년생':'-'} · ${m.region||'-'}${m.regionDetail?' '+escapeHTML(m.regionDetail):''} · ${m.phone || '연락처 없음'}</div>
       </div>
     </div>
     <div class="year-select" id="detailYearSelect"></div>
@@ -717,16 +1070,11 @@ function renderMemberDetail(m, years){
     const key = detailYear + '-' + String(mo).padStart(2,'0');
     months.push({ mo, key, paid: !!(m.dues && m.dues[key]) });
   }
-  const isFutureMonth = (mo) => {
-    const now = new Date();
-    return detailYear > now.getFullYear() || (detailYear === now.getFullYear() && mo > now.getMonth()+1);
-  };
   const h1 = months.slice(0,6), h2 = months.slice(6,12);
   const h1paid = h1.filter(x=>x.paid).length, h2paid = h2.filter(x=>x.paid).length;
 
   const monthCellHTML = (item) => {
-    const future = isFutureMonth(item.mo);
-    return `<div class="month-cell ${future?'future':(item.paid?'paid':'unpaid')}" data-key="${item.key}" data-future="${future}">
+    return `<div class="month-cell ${item.paid?'paid':'unpaid'}" data-key="${item.key}">
       <span class="dotmark"></span>${item.mo}월
     </div>`;
   };
@@ -749,97 +1097,316 @@ function renderMemberDetail(m, years){
       <div class="month-grid">${h1.map(monthCellHTML).join('')}</div>
       <div class="half-label">하반기 (7~12월) <b>${h2paid}/6 납부</b></div>
       <div class="month-grid">${h2.map(monthCellHTML).join('')}</div>
-      <div style="font-size:10.5px; color:var(--chalk-dim); margin-top:10px;">칸을 눌러 납부 여부를 바로 변경할 수 있어요.</div>
+      <div style="font-size:10.5px; color:var(--chalk-dim); margin:10px 0;">칸을 눌러 납부 여부를 바로 변경할 수 있어요. 아직 지나지 않은 달도 선납 등록이 가능해요.</div>
+      <button class="btn btn-primary btn-sm btn-block" id="btnBulkPrepay">📅 선납 일괄 등록</button>
     </div>
   `;
 
   document.querySelectorAll('#detailBody .month-cell').forEach(cell=>{
-    if(cell.dataset.future === 'true') return;
     cell.addEventListener('click', async ()=>{
+      if(!isExec()){ showToast('회비 납부 상태 변경은 집행부만 할 수 있어요'); return; }
+      const ok = await requireAdminPin('회비 납부 상태 변경');
+      if(!ok) return;
       const key = cell.dataset.key;
       m.dues = m.dues || {};
+      const prevVal = m.dues[key];
       m.dues[key] = !m.dues[key];
-      await saveMembers();
+      const saved = await saveMembers();
+      if(!saved){ m.dues[key] = prevVal; } // 저장 실패 시 되돌림
       renderMemberDetail(m, years);
       renderAll();
     });
   });
+
+  const bulkBtn = document.getElementById('btnBulkPrepay');
+  if(bulkBtn) bulkBtn.addEventListener('click', async ()=>{
+    if(!isExec()){ showToast('선납 등록은 집행부만 할 수 있어요'); return; }
+    const ok = await requireAdminPin('선납 일괄 등록');
+    if(!ok) return;
+    openBulkPrepayForm(m, years);
+  });
+}
+
+function openBulkPrepayForm(m, years){
+  const now = new Date();
+  const defaultStartMonth = detailYear === now.getFullYear() ? now.getMonth()+1 : 1;
+  const html = `
+    <div class="modal-head"><h3>선납 일괄 등록</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="match-meta" style="margin-bottom:10px;">${escapeHTML(m.name)}님의 ${detailYear}년 회비를 여러 달 한 번에 납부완료로 등록해요.</div>
+    <div class="row2">
+      <div><label>시작 월</label>
+        <select id="f_prepayStart">
+          ${Array.from({length:12},(_,i)=>i+1).map(mo=>`<option value="${mo}" ${mo===defaultStartMonth?'selected':''}>${mo}월</option>`).join('')}
+        </select>
+      </div>
+      <div><label>개월 수</label><input type="number" id="f_prepayCount" value="12" min="1" max="12"></div>
+    </div>
+    <div style="font-size:11px; color:var(--chalk-dim); margin-top:6px;">예: 7월부터 12개월 선택 시 다음 해 6월까지 자동으로 이어서 등록돼요.</div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary btn-block" id="btnConfirmPrepay">등록</button>
+    </div>
+  `;
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('overlay').classList.add('active');
+
+  document.getElementById('btnConfirmPrepay').addEventListener('click', async ()=>{
+    const startMonth = Number(document.getElementById('f_prepayStart').value);
+    const count = Math.min(60, Math.max(1, Number(document.getElementById('f_prepayCount').value)||1));
+    m.dues = m.dues || {};
+    let y = detailYear, mo = startMonth;
+    for(let i=0; i<count; i++){
+      const key = y + '-' + String(mo).padStart(2,'0');
+      m.dues[key] = true;
+      mo++;
+      if(mo>12){ mo=1; y++; }
+    }
+    await saveMembers();
+    closeModal();
+    renderMemberDetail(m, years);
+    renderAll();
+    showToast(`${count}개월치 선납을 등록했어요`);
+  });
+}
+
+function renderLeaderRequestSection(m){
+  const council = councilMembers();
+  if(m.pendingLeaderRequest){
+    const req = m.pendingLeaderRequest;
+    return `
+      <div class="card" style="padding:12px 14px; margin-top:10px;">
+        <div style="font-size:12.5px; margin-bottom:8px;">
+          <b>${req.targetRole}</b> 신청 진행 중 · 승인 ${req.approvedBy.length}/${req.requiredApproverIds.length}
+        </div>
+        <button class="btn btn-ghost btn-sm btn-block" id="btnCancelLeaderReq">신청 취소</button>
+      </div>`;
+  }
+  if(COUNCIL_ROLES.includes(m.role)){
+    return `<div class="match-meta" style="margin-top:10px; color:var(--gold);">현재 직책: ${m.role} (최고 의결권)</div>`;
+  }
+  return `
+    <div class="card" style="padding:12px 14px; margin-top:10px;">
+      <div style="font-size:11.5px; color:var(--chalk-dim); margin-bottom:8px;">
+        ${council.length===0
+          ? '아직 회장·고문이 한 명도 없어요. 지금 신청하면 승인 절차 없이 바로 지정돼요.'
+          : `회장·고문이 되려면 기존 회장·고문 전원(${council.length}명)의 만장일치 승인이 필요해요.`}
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-ghost btn-sm" style="flex:1;" id="btnApplyChief">회장 신청</button>
+        <button class="btn btn-ghost btn-sm" style="flex:1;" id="btnApplyAdvisor">고문 신청</button>
+      </div>
+    </div>`;
+}
+
+function renderRemovalSection(m){
+  if(m.pendingRemovalRequest){
+    const req = m.pendingRemovalRequest;
+    const me = currentMember();
+    const canApprove = me && req.requiredApproverIds.includes(me.id) && !req.approvedBy.includes(me.id);
+    return `
+      <div class="card" style="padding:12px 14px; margin-top:10px; border-color:#C1443C;">
+        <div style="font-size:12.5px; margin-bottom:8px; color:#FF9B92;">
+          ⚠️ 해임 절차 진행 중 · 동의 ${req.approvedBy.length}/${req.requiredApproverIds.length}
+        </div>
+        <div style="display:flex; gap:8px;">
+          ${canApprove ? `<button class="btn btn-danger btn-sm" style="flex:1;" id="btnApproveRemoval">동의</button>` : ''}
+          <button class="btn btn-ghost btn-sm" style="flex:1;" id="btnCancelRemoval">절차 취소</button>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="card" style="padding:12px 14px; margin-top:10px;">
+      <div style="font-size:11.5px; color:var(--chalk-dim); margin-bottom:8px;">
+        현재 직책: <b style="color:var(--gold);">${m.role}</b> — 해임하려면 본인 외 회장·고문 전원의 동의가 필요해요.
+      </div>
+      <button class="btn btn-danger btn-sm btn-block" id="btnProposeRemoval">해임 절차 시작</button>
+    </div>`;
+}
+
+function bindLeaderRequestButtons(m){
+  if(!m) return;
+  const applyChief = document.getElementById('btnApplyChief');
+  const applyAdvisor = document.getElementById('btnApplyAdvisor');
+  const cancelBtn = document.getElementById('btnCancelLeaderReq');
+  if(applyChief) applyChief.addEventListener('click', ()=> applyForLeaderRole(m, '회장'));
+  if(applyAdvisor) applyAdvisor.addEventListener('click', ()=> applyForLeaderRole(m, '고문'));
+  if(cancelBtn) cancelBtn.addEventListener('click', ()=> cancelLeaderRequest(m));
+
+  const proposeBtn = document.getElementById('btnProposeRemoval');
+  const approveRemovalBtn = document.getElementById('btnApproveRemoval');
+  const cancelRemovalBtn = document.getElementById('btnCancelRemoval');
+  if(proposeBtn) proposeBtn.addEventListener('click', ()=> proposeRemoval(m));
+  if(approveRemovalBtn) approveRemovalBtn.addEventListener('click', ()=> approveRemoval(m));
+  if(cancelRemovalBtn) cancelRemovalBtn.addEventListener('click', ()=> cancelRemoval(m));
 }
 
 function openMemberForm(id){
   const m = id ? memberById(id) : null;
+
+  if(m && !isExec() && !isSelf(m.id)){
+    showToast('본인 정보만 수정할 수 있어요 (집행부만 다른 회원 수정 가능)');
+    return;
+  }
+
   const mk = todayMonthKey();
+  const canEditRoleAndDues = !m || isExec(); // 직책/회비/등번호는 집행부만 확정 가능
+  const roleFullyLocked = !!(m && COUNCIL_ROLES.includes(m.role) && !isSelf(m.id)); // 타인의 회장/고문 직책은 해임절차로만 변경 가능
+
   const html = `
     <div class="modal-head"><h3>${m?'회원 정보 수정':'새 회원 등록'}</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    ${!m ? `<div class="match-meta" style="margin-bottom:8px;">등록 신청 후 회장(집행부) 승인이 완료되면 정식 회원으로 활동할 수 있어요.</div>` : ''}
+    ${m && m.status==='pending' ? `<div class="match-meta" style="margin-bottom:8px; color:var(--gold);">⏳ 승인 대기 중인 회원이에요.</div>` : ''}
 
     <label>이름</label>
     <input type="text" id="f_name" value="${m?escapeHTML(m.name):''}" placeholder="예: 이동준">
 
     <div class="row2">
-      <div><label>등번호</label><input type="number" id="f_number" value="${m?m.number??'':''}" placeholder="예: 10"></div>
-      <div><label>연락처</label><input type="text" id="f_phone" value="${m?m.phone||'':''}" placeholder="010-0000-0000"></div>
+      <div><label>등번호</label><input type="number" id="f_number" value="${m?m.number??'':''}" placeholder="예: 10" ${canEditRoleAndDues?'':'disabled'}></div>
+      <div><label>생년</label><input type="number" id="f_birthYear" value="${m?m.birthYear??'':''}" placeholder="예: 1990" min="1930" max="${new Date().getFullYear()}"></div>
     </div>
+
+    <label>지역</label>
+    <select id="f_region">
+      <option value="">선택 안함</option>
+      ${REGIONS.map(r=>`<option value="${r}" ${m&&m.region===r?'selected':''}>${r}</option>`).join('')}
+    </select>
+    <input type="text" id="f_regionDetail" value="${m?escapeHTML(m.regionDetail||''):''}" placeholder="세부지역 (예: 강남구 역삼동)" style="margin-top:6px;">
+
+    <label>연락처</label>
+    <input type="text" id="f_phone" value="${m?m.phone||'':''}" placeholder="010-0000-0000">
 
     <label>포지션</label>
     <div class="chip-select" id="f_position">
       ${POSITIONS.map(p=>`<div class="chip ${m&&m.position===p?'active':''}" data-val="${p}">${p}</div>`).join('')}
     </div>
 
-    <label>직책</label>
+    <label>직책 ${roleFullyLocked ? '(회장·고문 해임은 아래 절차로만 가능)' : (canEditRoleAndDues?'(회장·고문은 아래 신청 절차로만 지정 가능)':'(집행부만 변경 가능)')}</label>
     <div class="chip-select" id="f_role">
-      ${ROLES.map(r=>`<div class="chip ${(m?m.role:'회원')===r?'active':''}" data-val="${r}">${r}</div>`).join('')}
+      ${ROLES.map(r=>`<div class="chip ${(m?m.role:'회원')===r?'active':''} ${(!canEditRoleAndDues||COUNCIL_ROLES.includes(r)||roleFullyLocked)?'chip-locked':''}" data-val="${r}" ${COUNCIL_ROLES.includes(r)?'data-council="1"':''}>${r}</div>`).join('')}
     </div>
 
+    ${canEditRoleAndDues ? `
     <label>이번 달(${mk}) 회비 납부</label>
     <div class="chip-select" id="f_dues">
       <div class="chip ${m&&m.dues&&m.dues[mk]?'active':''}" data-val="paid">납부완료</div>
       <div class="chip ${!(m&&m.dues&&m.dues[mk])?'active':''}" data-val="unpaid">미납</div>
+    </div>` : ''}
+
+    ${(m && isSelf(m.id) && m.status==='active') ? renderLeaderRequestSection(m) : ''}
+    ${(m && isExec() && !isSelf(m.id) && COUNCIL_ROLES.includes(m.role)) ? renderRemovalSection(m) : ''}
+
+    <div class="card" style="padding:12px 14px; margin-top:14px;">
+      <div style="font-size:11.5px; color:var(--chalk-dim); line-height:1.6; margin-bottom:8px;">
+        수집 항목: 이름, 전화번호, 연령, 지역, 등번호, 포지션, 직책, 회비 납부 내역<br>
+        수집 목적: 팀 회원 관리, 경기 일정 및 회비 운영<br>
+        보유 기간: 팀 탈퇴 또는 삭제 요청 시까지
+      </div>
+      <label class="chip-check" style="display:flex; align-items:center; gap:8px; font-size:12.5px; cursor:pointer;">
+        <input type="checkbox" id="f_privacyConsent" ${m&&m.privacyConsent?'checked':''} style="width:16px;height:16px;">
+        개인정보 수집·이용에 동의합니다 (필수)
+      </label>
     </div>
 
     <div class="modal-foot">
-      ${m?'<button class="btn btn-danger" id="btnDeleteMember">삭제</button>':''}
+      ${(m && isExec())?'<button class="btn btn-danger" id="btnDeleteMember">삭제</button>':''}
       <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary btn-block" id="btnSaveMember">저장</button>
+      <button class="btn btn-primary btn-block" id="btnSaveMember">${m?'저장':'등록 신청'}</button>
     </div>
+    ${(m && m.status==='pending' && isExec()) ? `<button class="btn btn-primary btn-block" id="btnApproveMember" style="margin-top:8px;">✓ 회원 승인</button>` : ''}
+    ${(m && m.status==='pending' && isSelf(m.id) && !isExec() && activeRoster().length===0) ? `
+      <div class="match-meta" style="margin-top:10px; color:var(--gold);">아직 활동 중인 회원이 한 명도 없어서 승인해줄 사람이 없어요. 최초 회원은 스스로 활성화할 수 있어요.</div>
+      <button class="btn btn-primary btn-block" id="btnSelfActivate" style="margin-top:8px;">✓ 최초 회원으로 활성화</button>
+    ` : ''}
   `;
   document.getElementById('modalBody').innerHTML = html;
   document.getElementById('overlay').classList.add('active');
 
   bindChipGroup('f_position');
-  bindChipGroup('f_role');
-  bindChipGroup('f_dues');
+  if(canEditRoleAndDues){
+    // 회장/고문 칩은 잠금(신청 절차 전용) - 나머지 직책 칩만 클릭 가능
+    document.querySelectorAll('#f_role .chip:not(.chip-locked)').forEach(chip=>{
+      chip.addEventListener('click', ()=>{
+        document.querySelectorAll('#f_role .chip').forEach(c=>c.classList.remove('active'));
+        chip.classList.add('active');
+      });
+    });
+    bindChipGroup('f_dues');
+  }
+  bindLeaderRequestButtons(m);
 
   document.getElementById('btnSaveMember').addEventListener('click', async ()=>{
     const name = document.getElementById('f_name').value.trim();
     if(!name){ showToast('이름을 입력해주세요'); return; }
     if(!m && MEMBERS.length>=50){ showToast('최대 50명까지 등록 가능합니다'); return; }
     const number = document.getElementById('f_number').value;
+    const birthYear = document.getElementById('f_birthYear').value;
+    const region = document.getElementById('f_region').value;
+    const regionDetail = document.getElementById('f_regionDetail').value.trim();
     const phone = document.getElementById('f_phone').value.trim();
     const position = getActiveChip('f_position');
-    const role = getActiveChip('f_role') || '회원';
-    const duesVal = getActiveChip('f_dues') === 'paid';
+    const privacyConsent = document.getElementById('f_privacyConsent').checked;
+    if(!phone){ showToast('연락처를 입력해주세요'); return; }
+    if(!privacyConsent){ showToast('개인정보 수집·이용 동의가 필요해요'); return; }
 
     if(m){
-      m.name = name; m.number = number?Number(number):null; m.phone = phone; m.position = position; m.role = role;
-      m.dues = m.dues || {};
-      m.dues[mk] = duesVal;
+      m.name = name; m.birthYear = birthYear?Number(birthYear):null; m.region = region||null; m.regionDetail = regionDetail||null;
+      m.phone = phone; m.position = position;
+      if(canEditRoleAndDues){
+        m.number = number?Number(number):null;
+        m.role = getActiveChip('f_role') || m.role || '회원';
+        m.dues = m.dues || {};
+        m.dues[mk] = getActiveChip('f_dues') === 'paid';
+      }
+      m.privacyConsent = true;
+      if(!m.privacyConsentAt) m.privacyConsentAt = new Date().toISOString();
     }else{
       MEMBERS.push({
-        id: uid('mem'), name, number: number?Number(number):null, phone, position, role,
+        id: uid('mem'), name, number: null, birthYear: birthYear?Number(birthYear):null, region: region||null, regionDetail: regionDetail||null,
+        phone, position, role: '회원',
+        status: 'pending',
+        privacyConsent: true,
+        privacyConsentAt: new Date().toISOString(),
         joinDate: new Date().toISOString().slice(0,10),
-        dues: { [mk]: duesVal }
+        dues: {}
       });
     }
     await saveMembers();
     closeModal();
     renderAll();
-    showToast(m?'회원 정보를 수정했습니다':'회원을 등록했습니다');
+    showToast(m ? '회원 정보를 수정했습니다' : '등록 신청이 완료됐어요. 회장 승인 후 활동 가능해요');
   });
+
+  const approveBtn = document.getElementById('btnApproveMember');
+  if(approveBtn){
+    approveBtn.addEventListener('click', async ()=>{
+      const ok = await requireAdminPin('회원 승인');
+      if(!ok) return;
+      m.status = 'active';
+      await saveMembers();
+      closeModal();
+      renderAll();
+      showToast(`${m.name} 회원을 승인했습니다`);
+    });
+  }
+
+  const selfActivateBtn = document.getElementById('btnSelfActivate');
+  if(selfActivateBtn){
+    selfActivateBtn.addEventListener('click', async ()=>{
+      if(activeRoster().length > 0){ showToast('이미 활동 중인 회원이 있어서 승인이 필요해요'); renderAll(); return; }
+      m.status = 'active';
+      await saveMembers();
+      closeModal();
+      renderAll();
+      showToast('최초 회원으로 활성화됐어요. 이제 회장/고문 신청도 가능해요');
+    });
+  }
 
   const delBtn = document.getElementById('btnDeleteMember');
   if(delBtn){
     delBtn.addEventListener('click', async ()=>{
       if(!confirm(`${m.name} 회원을 삭제할까요?`)) return;
+      const ok = await requireAdminPin('회원 삭제');
+      if(!ok) return;
       MEMBERS = MEMBERS.filter(x=>x.id!==m.id);
       await saveMembers();
       closeModal();
@@ -879,12 +1446,53 @@ function renderMatches(){
   bindMatchCardEvents(pastBox);
 }
 
+const TEAM_COLOR_LABEL = { orange:'🟠 주황', yellow:'🟡 노랑', black:'⚫ 검정' };
+
+function internalTeamTotals(m){
+  const totals = { orange:{goals:0,wins:0,draws:0,losses:0}, yellow:{goals:0,wins:0,draws:0,losses:0}, black:{goals:0,wins:0,draws:0,losses:0} };
+  (m.quarters||[]).forEach(q=>{
+    if(!q.side1 || !q.side2) return;
+    const s1 = Number(q.score1)||0, s2 = Number(q.score2)||0;
+    if(totals[q.side1]) totals[q.side1].goals += s1;
+    if(totals[q.side2]) totals[q.side2].goals += s2;
+    if(s1>s2){ if(totals[q.side1]) totals[q.side1].wins++; if(totals[q.side2]) totals[q.side2].losses++; }
+    else if(s2>s1){ if(totals[q.side2]) totals[q.side2].wins++; if(totals[q.side1]) totals[q.side1].losses++; }
+    else { if(totals[q.side1]) totals[q.side1].draws++; if(totals[q.side2]) totals[q.side2].draws++; }
+  });
+  return totals;
+}
+function externalTotals(m){
+  let scoreA = 0, scoreB = 0;
+  (m.quarters||[]).forEach(q=>{ scoreA += Number(q.score1)||0; scoreB += Number(q.score2)||0; });
+  return { scoreA, scoreB };
+}
+
 function matchCardHTML(m, showActions){
   const dateObj = new Date(m.date + 'T' + (m.time||'00:00'));
   const dateStr = dateObj.toLocaleDateString('ko-KR', { month:'short', day:'numeric', weekday:'short' });
   const timeStr = m.time || '';
   const rsvpCounts = countRSVP(m);
   const isDone = m.status==='done';
+  const isInternal = m.matchType === 'internal';
+
+  let vsHTML;
+  if(isInternal){
+    if(isDone){
+      const totals = internalTeamTotals(m);
+      vsHTML = `<div style="display:flex; justify-content:space-around; width:100%; font-size:12.5px;">
+        ${Object.keys(TEAM_COLOR_LABEL).map(c=>`<span>${TEAM_COLOR_LABEL[c]} <b style="color:var(--gold);">${totals[c].wins}승${totals[c].draws?totals[c].draws+'무':''}${totals[c].losses}패</b></span>`).join('')}
+      </div>`;
+    }else{
+      vsHTML = `<span class="team-name">자체경기 (주황 · 노랑 · 검정)</span>`;
+    }
+  }else{
+    vsHTML = `
+        <span class="team-name">공사랑FC</span>
+        ${isDone
+          ? (()=>{ const t = externalTotals(m); return `<span class="score">${t.scoreA} : ${t.scoreB}</span>`; })()
+          : `<span class="team-name" style="color:var(--chalk-dim);">VS</span>`}
+        <span class="team-name">${escapeHTML(m.opponent||'상대팀 미정')}</span>`;
+  }
 
   return `
   <div class="match-card" data-id="${m.id}">
@@ -894,15 +1502,12 @@ function matchCardHTML(m, showActions){
     </div>
     <div class="match-body">
       <div class="match-vs">
-        <span class="team-name">공사랑FC</span>
-        ${isDone
-          ? `<span class="score">${m.result?.scoreA ?? 0} : ${m.result?.scoreB ?? 0}</span>`
-          : `<span class="team-name" style="color:var(--chalk-dim);">VS</span>`}
-        <span class="team-name">${escapeHTML(m.opponent||'상대팀 미정')}</span>
+        ${vsHTML}
       </div>
       <div class="match-meta">
         📍 ${escapeHTML(m.location||'장소 미정')}${m.cost ? ` · 대관비 ${Number(m.cost).toLocaleString()}원` : ''}<br>
         ${!isDone ? `✅ 참석 ${rsvpCounts.yes} · ❔ 미정 ${rsvpCounts.maybe} · ❌ 불참 ${rsvpCounts.no}` : (m.result?.mom ? `🏅 MOM: ${escapeHTML(memberName(m.result.mom))}` : '')}
+        ${isDone && m.quarters && m.quarters.length ? ` · ⏱ ${m.quarters.length}쿼터 진행` : ''}
       </div>
       ${showActions ? `
       <div class="match-actions">
@@ -918,9 +1523,8 @@ function matchCardHTML(m, showActions){
 
 function countRSVP(m){
   const c = {yes:0, no:0, maybe:0};
-  const rsvp = m.rsvp || {};
-  MEMBERS.forEach(mem=>{
-    const v = rsvp[mem.id];
+  activeRoster().forEach(mem=>{
+    const v = rsvpStatus(m, mem.id);
     if(v==='yes') c.yes++; else if(v==='no') c.no++; else c.maybe++;
   });
   return c;
@@ -936,7 +1540,10 @@ function bindMatchCardEvents(container){
         const act = btn.dataset.act;
         const m = MATCHES.find(x=>x.id===id);
         if(act==='rsvp') openRSVPForm(m);
-        if(act==='teams') openTeamForm(m);
+        if(act==='teams'){
+          if(!isExec()){ showToast('팀 편성은 집행부만 할 수 있어요'); return; }
+          openTeamForm(m);
+        }
         if(act==='finish' || act==='editresult') openResultForm(m);
         if(act==='delete') deleteMatch(m);
       });
@@ -945,24 +1552,39 @@ function bindMatchCardEvents(container){
 }
 
 async function deleteMatch(m){
+  if(!isExec()){ showToast('경기 삭제는 집행부만 할 수 있어요'); return; }
   if(!confirm('이 경기를 삭제할까요?')) return;
+  const ok = await requireAdminPin('경기 삭제');
+  if(!ok) return;
   MATCHES = MATCHES.filter(x=>x.id!==m.id);
   await saveMatches();
   renderAll();
   showToast('경기를 삭제했습니다');
 }
 
+function nextSaturdayISO(){
+  const d = new Date();
+  const daysAhead = (6 - d.getDay() + 7) % 7 || 7; // 오늘이 토요일이면 다음주 토요일
+  d.setDate(d.getDate() + daysAhead);
+  return d.toISOString().slice(0,10);
+}
+
 function openMatchForm(){
   const html = `
     <div class="modal-head"><h3>새 경기 등록</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <label>경기 유형</label>
+    <div class="chip-select" id="f_matchType">
+      <div class="chip active" data-val="external">외부매칭</div>
+      <div class="chip" data-val="internal">자체경기 (주황/노랑/검정)</div>
+    </div>
     <div class="row2">
-      <div><label>날짜</label><input type="date" id="f_date"></div>
-      <div><label>시간</label><input type="time" id="f_time" value="20:00"></div>
+      <div><label>날짜</label><input type="date" id="f_date" value="${nextSaturdayISO()}"></div>
+      <div><label>시간</label><input type="time" id="f_time" value="06:00"></div>
     </div>
     <label>장소</label>
-    <input type="text" id="f_location" placeholder="예: 강남 futsal park">
+    <input type="text" id="f_location" value="구일역풋살장" placeholder="예: 구일역풋살장">
     <div class="row2">
-      <div><label>상대팀</label><input type="text" id="f_opponent" placeholder="예: FC 우리동네"></div>
+      <div id="opponentField"><label>상대팀</label><input type="text" id="f_opponent" placeholder="예: FC 우리동네"></div>
       <div><label>대관비(원)</label><input type="number" id="f_cost" placeholder="예: 120000"></div>
     </div>
     <div class="modal-foot">
@@ -972,20 +1594,31 @@ function openMatchForm(){
   `;
   document.getElementById('modalBody').innerHTML = html;
   document.getElementById('overlay').classList.add('active');
+  bindChipGroup('f_matchType');
+
+  document.querySelectorAll('#f_matchType .chip').forEach(chip=>{
+    chip.addEventListener('click', ()=>{
+      const type = getActiveChip('f_matchType');
+      document.getElementById('opponentField').style.display = (type==='internal') ? 'none' : '';
+    });
+  });
 
   document.getElementById('btnSaveMatch').addEventListener('click', async ()=>{
     const date = document.getElementById('f_date').value;
     if(!date){ showToast('날짜를 선택해주세요'); return; }
+    const matchType = getActiveChip('f_matchType') || 'external';
     MATCHES.push({
       id: uid('match'),
+      matchType,
       date,
-      time: document.getElementById('f_time').value || '20:00',
-      location: document.getElementById('f_location').value.trim(),
-      opponent: document.getElementById('f_opponent').value.trim(),
+      time: document.getElementById('f_time').value || '06:00',
+      location: document.getElementById('f_location').value.trim() || '구일역풋살장',
+      opponent: matchType==='internal' ? '' : document.getElementById('f_opponent').value.trim(),
       cost: document.getElementById('f_cost').value || null,
       status: 'upcoming',
       rsvp: {},
-      teams: {A:[], B:[]},
+      teams: matchType==='internal' ? {orange:[], yellow:[], black:[]} : {A:[], B:[]},
+      quarters: [],
       result: null
     });
     await saveMatches();
@@ -996,9 +1629,15 @@ function openMatchForm(){
 }
 
 function openRSVPForm(m){
+  const me = currentMember();
+  const hint = isExec()
+    ? '집행부는 모든 회원의 참석 여부를 대신 체크할 수 있어요.'
+    : (me ? '본인 참석 여부만 체크할 수 있어요. 다른 회원 항목은 비활성화되어 있어요.'
+          : '본인 참석 체크를 하려면 먼저 우측 상단 👤(본인 확인)에서 본인을 선택해주세요.');
   const html = `
     <div class="modal-head"><h3>참석 체크</h3><button class="close-x" onclick="closeModal()">✕</button></div>
     <div class="match-meta" style="margin-bottom:8px;">${m.date} ${m.time} · ${escapeHTML(m.location||'')} vs ${escapeHTML(m.opponent||'')}</div>
+    <div class="match-meta" style="margin-bottom:8px; color:${me||isExec()?'var(--chalk-dim)':'var(--gold)'};">${hint}</div>
     <div class="card rsvp-list" style="padding:4px 10px; max-height:50vh; overflow-y:auto;" id="rsvpList"></div>
     <div class="modal-foot">
       <button class="btn btn-primary btn-block" onclick="closeModal()">완료</button>
@@ -1011,38 +1650,55 @@ function openRSVPForm(m){
 
 function renderRSVPList(m){
   const box = document.getElementById('rsvpList');
-  if(MEMBERS.length===0){ box.innerHTML = `<div class="empty"><p>등록된 회원이 없습니다.</p></div>`; return; }
-  const sorted = [...MEMBERS].sort((a,b)=>(a.number||999)-(b.number||999));
+  const roster = activeRoster();
+  if(roster.length===0){ box.innerHTML = `<div class="empty"><p>등록된(승인된) 회원이 없습니다.</p></div>`; return; }
+  const sorted = [...roster].sort((a,b)=>(a.number||999)-(b.number||999));
   box.innerHTML = sorted.map(mem=>{
-    const v = m.rsvp[mem.id] || 'maybe';
+    const v = rsvpStatus(m, mem.id);
+    const editable = isExec() || isSelf(mem.id);
     return `
     <div class="member-row">
       <div class="jersey">${mem.number ?? '-'}</div>
       <div class="member-info"><div class="name">${escapeHTML(mem.name)}</div></div>
-      <div class="rsvp-btns" data-mid="${mem.id}">
-        <button class="rsvp-btn yes ${v==='yes'?'active':''}" data-v="yes">✓</button>
-        <button class="rsvp-btn maybe ${v==='maybe'?'active':''}" data-v="maybe">?</button>
-        <button class="rsvp-btn no ${v==='no'?'active':''}" data-v="no">✕</button>
+      <div class="rsvp-btns" data-mid="${mem.id}" data-editable="${editable}">
+        <button class="rsvp-btn yes ${v==='yes'?'active':''}" data-v="yes" ${editable?'':'disabled style="opacity:.35;"'}>✓</button>
+        <button class="rsvp-btn maybe ${v==='maybe'?'active':''}" data-v="maybe" ${editable?'':'disabled style="opacity:.35;"'}>?</button>
+        <button class="rsvp-btn no ${v==='no'?'active':''}" data-v="no" ${editable?'':'disabled style="opacity:.35;"'}>✕</button>
       </div>
     </div>`;
   }).join('');
 
-  box.querySelectorAll('.rsvp-btns').forEach(group=>{
+  box.querySelectorAll('.rsvp-btns[data-editable="true"]').forEach(group=>{
     group.querySelectorAll('.rsvp-btn').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const mid = group.dataset.mid;
-        m.rsvp[mid] = btn.dataset.v;
-        await saveMatches();
-        group.querySelectorAll('.rsvp-btn').forEach(b=>b.classList.remove('active'));
-        btn.classList.add('active');
+        const prevValue = rsvpStatus(m, mid);
+        const prevAt = rsvpAt(m, mid);
+        group.querySelectorAll('.rsvp-btn').forEach(b=>b.disabled = true);
+        setRsvp(m, mid, btn.dataset.v);
+        const ok = await saveMatches();
+        group.querySelectorAll('.rsvp-btn').forEach(b=>b.disabled = false);
+        if(ok){
+          group.querySelectorAll('.rsvp-btn').forEach(b=>b.classList.remove('active'));
+          btn.classList.add('active');
+        }else{
+          // 저장 실패 시 화면에는 표시하지 않고 이전 값으로 되돌려서, 실제 저장 안 된 상태를 잘못 보여주지 않게 함
+          m.rsvp[mid] = prevAt ? { value: prevValue, at: prevAt } : prevValue;
+        }
       });
     });
   });
 }
 
 function openTeamForm(m){
-  const attending = MEMBERS.filter(mem => (m.rsvp[mem.id]||'maybe') === 'yes');
-  const pool = attending.length ? attending : MEMBERS;
+  if(m.matchType === 'internal') return openInternalTeamForm(m);
+  return openExternalTeamForm(m);
+}
+
+function openExternalTeamForm(m){
+  const roster = activeRoster();
+  const attending = roster.filter(mem => rsvpStatus(m, mem.id) === 'yes');
+  const pool = attending.length ? attending : roster;
   if(!m.teams) m.teams = {A:[], B:[]};
 
   const html = `
@@ -1120,73 +1776,252 @@ function openTeamForm(m){
   });
 }
 
+function openInternalTeamForm(m){
+  const roster = activeRoster();
+  const attendingNow = roster.filter(mem => rsvpStatus(m, mem.id) === 'yes');
+  const pool = attendingNow.length ? attendingNow : roster;
+  if(!m.teams || !m.teams.orange) m.teams = {orange:[], yellow:[], black:[]};
+
+  const cutoff = fridayCutoff(m.date);
+  const attendingByCutoff = roster.filter(mem=>{
+    if(rsvpStatus(m, mem.id) !== 'yes') return false;
+    const at = rsvpAt(m, mem.id);
+    return !at || new Date(at) <= cutoff;
+  });
+  const suggestedMode = attendingByCutoff.length > 12 ? 3 : 2;
+  if(!m.teamMode) m.teamMode = suggestedMode;
+
+  const allColors = ['orange','yellow','black'];
+  let colors = m.teamMode === 3 ? allColors : ['orange','yellow'];
+
+  const html = `
+    <div class="modal-head"><h3>팀 편성 (자체경기)</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="match-meta" style="margin-bottom:6px;">
+      금요일 18:00 마감 기준 참석 <b>${attendingByCutoff.length}명</b> → 추천 <b>${suggestedMode}팀</b> (12명 이하 2팀 · 초과 3팀)<br>
+      현재 참석 체크 인원: ${attendingNow.length}명
+    </div>
+    <label>팀 수</label>
+    <div class="chip-select" id="f_teamMode">
+      <div class="chip ${m.teamMode===2?'active':''}" data-val="2">2팀 (주황·노랑)</div>
+      <div class="chip ${m.teamMode===3?'active':''}" data-val="3">3팀 (주황·노랑·검정)</div>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="btnAutoTeam3" style="margin:10px 0;">🔀 랜덤 자동 편성</button>
+    <div id="teamColumns" style="display:grid; gap:8px;"></div>
+    <label style="margin-top:12px;">미배정 인원</label>
+    <div class="card" id="teamPoolList3" style="padding:6px 8px;"></div>
+    <div class="modal-foot">
+      <button class="btn btn-primary btn-block" id="btnSaveTeams3">저장</button>
+    </div>
+  `;
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('overlay').classList.add('active');
+  bindChipGroup('f_teamMode');
+
+  const listElId = { orange:'teamOrangeList', yellow:'teamYellowList', black:'teamBlackList' };
+  const countElId = { orange:'countOrange', yellow:'countYellow', black:'countBlack' };
+  const colorStyle = { orange:'#F0A94E', yellow:'#E8D24E', black:'#B9B9C6' };
+  const shortLabel = { orange:'주황', yellow:'노랑', black:'검정' };
+
+  function renderColumns(){
+    document.getElementById('teamColumns').style.gridTemplateColumns = colors.map(()=>'1fr').join(' ');
+    document.getElementById('teamColumns').innerHTML = colors.map(c=>`
+      <div><label style="color:${colorStyle[c]};">${TEAM_COLOR_LABEL[c]} (<span id="${countElId[c]}">0</span>)</label>
+      <div class="card" id="${listElId[c]}" style="padding:5px 6px; min-height:140px;"></div></div>
+    `).join('');
+  }
+
+  function renderTeams3(){
+    if(colors.length===2){ m.teams.black = []; }
+    renderColumns();
+    const assigned = new Set(colors.flatMap(c=>m.teams[c]));
+    const unassigned = pool.filter(mem => !assigned.has(mem.id));
+
+    colors.forEach(c=>{ document.getElementById(countElId[c]).textContent = m.teams[c].length; });
+
+    const rowHTML = (mem, zone) => `
+      <div class="member-row" data-id="${mem.id}" style="padding:5px 3px; flex-wrap:wrap;">
+        <div class="jersey" style="width:24px;height:24px;font-size:10px;">${mem.number ?? '-'}</div>
+        <div class="member-info"><div class="name" style="font-size:12px;">${escapeHTML(mem.name)}</div></div>
+        <div style="display:flex; gap:3px; flex-wrap:wrap;">
+          ${colors.filter(c=>c!==zone).map(c=>`<button class="btn btn-ghost btn-sm" style="padding:4px 6px; font-size:10px;" data-to="${c}">${shortLabel[c]}</button>`).join('')}
+          ${zone!=='pool'?`<button class="btn btn-ghost btn-sm" style="padding:4px 6px; font-size:10px;" data-to="pool">-</button>`:''}
+        </div>
+      </div>`;
+
+    colors.forEach(c=>{
+      document.getElementById(listElId[c]).innerHTML = m.teams[c].length ? m.teams[c].map(id=>rowHTML(memberById(id), c)).join('') : `<div style="font-size:10.5px;color:var(--chalk-dim);padding:6px;">비어있음</div>`;
+    });
+    document.getElementById('teamPoolList3').innerHTML = unassigned.length ? unassigned.map(mem=>rowHTML(mem,'pool')).join('') : `<div style="font-size:11px;color:var(--chalk-dim);padding:8px;">모두 배정됨</div>`;
+
+    document.querySelectorAll('#teamColumns [data-to], #teamPoolList3 [data-to]').forEach(btn=>{
+      btn.addEventListener('click', (e)=>{
+        const row = e.target.closest('.member-row');
+        const id = row.dataset.id;
+        allColors.forEach(c=>{ m.teams[c] = m.teams[c].filter(x=>x!==id); });
+        if(btn.dataset.to !== 'pool') m.teams[btn.dataset.to].push(id);
+        renderTeams3();
+      });
+    });
+  }
+  renderTeams3();
+
+  document.querySelectorAll('#f_teamMode .chip').forEach(chip=>{
+    chip.addEventListener('click', ()=>{
+      m.teamMode = Number(getActiveChip('f_teamMode'));
+      colors = m.teamMode === 3 ? allColors : ['orange','yellow'];
+      renderTeams3();
+    });
+  });
+
+  document.getElementById('btnAutoTeam3').addEventListener('click', ()=>{
+    const shuffled = [...pool].sort(()=>Math.random()-0.5);
+    m.teams = { orange:[], yellow:[], black:[] };
+    shuffled.forEach((mem,i)=>{ m.teams[colors[i%colors.length]].push(mem.id); });
+    renderTeams3();
+  });
+
+  document.getElementById('btnSaveTeams3').addEventListener('click', async ()=>{
+    await saveMatches();
+    closeModal();
+    showToast(`팀 편성을 저장했습니다 (${m.teamMode}팀)`);
+  });
+}
+
+const EVENT_TYPES = ['득점','도움','방어','기타'];
+const MAX_QUARTERS = 10;
+
 function openResultForm(m){
-  if(!m.result) m.result = { scoreA:0, scoreB:0, scorers:[], mom:null };
-  const attending = MEMBERS.filter(mem => (m.rsvp[mem.id]||'maybe') === 'yes');
-  const pool = attending.length ? attending : MEMBERS;
+  if(!m.quarters) m.quarters = [];
+  if(!m.result) m.result = { mom:null };
+  const isInternal = m.matchType === 'internal';
+  const roster = activeRoster();
+  const attending = roster.filter(mem => rsvpStatus(m, mem.id) === 'yes');
+  const pool = attending.length ? attending : roster;
+  const full = isExec();
+  const me = currentMember();
+  const modeColors = isInternal ? (m.teamMode===3 ? ['orange','yellow','black'] : ['orange','yellow']) : null;
 
   const html = `
     <div class="modal-head"><h3>경기 결과 입력</h3><button class="close-x" onclick="closeModal()">✕</button></div>
-    <div class="match-meta" style="margin-bottom:10px;">공사랑FC vs ${escapeHTML(m.opponent||'상대팀')}</div>
-    <div class="row2">
-      <div><label>공사랑FC 득점</label><input type="number" id="f_scoreA" value="${m.result.scoreA}"></div>
-      <div><label>${escapeHTML(m.opponent||'상대팀')} 득점</label><input type="number" id="f_scoreB" value="${m.result.scoreB}"></div>
-    </div>
+    <div class="match-meta" style="margin-bottom:10px;">${isInternal ? '자체경기' : `공사랑FC vs ${escapeHTML(m.opponent||'상대팀')}`}</div>
+    ${!full ? `<div class="match-meta" style="margin-bottom:10px; color:var(--gold);">${me ? '집행부가 아니라서 쿼터 점수는 볼 수만 있고, 본인 기록(득점·도움·방어)만 추가·수정할 수 있어요.' : '본인 확인(👤)을 먼저 해주시면 본인 기록을 입력할 수 있어요.'}</div>` : ''}
 
-    <label>득점 / 도움 기록</label>
-    <div class="card" id="scorerList" style="padding:6px 10px; max-height:32vh; overflow-y:auto;"></div>
-    <button class="btn btn-ghost btn-sm" id="btnAddScorer" style="margin-top:8px;">+ 기록 추가</button>
+    <label>쿼터별 기록 (최대 ${MAX_QUARTERS}쿼터)</label>
+    <div id="quarterList"></div>
+    ${full ? `<button class="btn btn-ghost btn-sm" id="btnAddQuarter" style="margin:8px 0 4px;">+ 쿼터 추가</button>` : ''}
 
-    <label>오늘의 MOM</label>
-    <select id="f_mom">
+    <label style="margin-top:14px;">오늘의 MOM</label>
+    <select id="f_mom" ${full?'':'disabled'}>
       <option value="">선택 안함</option>
       ${pool.map(mem=>`<option value="${mem.id}" ${m.result.mom===mem.id?'selected':''}>${escapeHTML(mem.name)}</option>`).join('')}
     </select>
 
     <div class="modal-foot">
       <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary btn-block" id="btnSaveResult">저장 및 종료</button>
+      <button class="btn btn-primary btn-block" id="btnSaveResult">${full?'저장 및 종료':'저장'}</button>
     </div>
   `;
   document.getElementById('modalBody').innerHTML = html;
   document.getElementById('overlay').classList.add('active');
 
-  function renderScorers(){
-    const box = document.getElementById('scorerList');
-    if(!m.result.scorers.length){
-      box.innerHTML = `<div style="font-size:11.5px;color:var(--chalk-dim);padding:8px;">기록이 없습니다. + 버튼으로 추가하세요.</div>`;
-      return;
-    }
-    box.innerHTML = m.result.scorers.map((s,i)=>`
-      <div class="row2" style="margin-bottom:8px; align-items:center; grid-template-columns:2fr 1fr 1fr auto;">
-        <select data-i="${i}" class="s-member">
-          ${pool.map(mem=>`<option value="${mem.id}" ${s.memberId===mem.id?'selected':''}>${escapeHTML(mem.name)}</option>`).join('')}
-        </select>
-        <input type="number" data-i="${i}" class="s-goals" value="${s.goals||0}" placeholder="골" title="득점">
-        <input type="number" data-i="${i}" class="s-assists" value="${s.assists||0}" placeholder="도움" title="도움">
-        <button class="btn btn-danger btn-sm" data-i="${i}" data-del="1">✕</button>
-      </div>
-    `).join('');
+  const colorOptionsHTML = (selected) => (modeColors||['orange','yellow','black']).map(c=>
+    `<option value="${c}" ${selected===c?'selected':''}>${TEAM_COLOR_LABEL[c]}</option>`
+  ).join('');
 
-    box.querySelectorAll('.s-member').forEach(el=> el.addEventListener('change', e=>{ m.result.scorers[e.target.dataset.i].memberId = e.target.value; }));
-    box.querySelectorAll('.s-goals').forEach(el=> el.addEventListener('input', e=>{ m.result.scorers[e.target.dataset.i].goals = Number(e.target.value)||0; }));
-    box.querySelectorAll('.s-assists').forEach(el=> el.addEventListener('input', e=>{ m.result.scorers[e.target.dataset.i].assists = Number(e.target.value)||0; }));
-    box.querySelectorAll('[data-del]').forEach(el=> el.addEventListener('click', e=>{
-      m.result.scorers.splice(Number(e.target.dataset.i),1);
-      renderScorers();
+  function renderQuarters(){
+    const box = document.getElementById('quarterList');
+    if(!m.quarters.length){
+      box.innerHTML = `<div class="card" style="padding:14px; font-size:11.5px; color:var(--chalk-dim);">쿼터가 없습니다.${full?" '+ 쿼터 추가'로 시작하세요.":''}</div>`;
+    }else{
+      box.innerHTML = m.quarters.map((q,qi)=>`
+        <div class="card" style="padding:12px 14px; margin-bottom:10px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <b style="color:var(--gold); font-family:'Oswald',sans-serif;">쿼터 ${qi+1}</b>
+            ${full?`<button class="btn btn-danger btn-sm" data-qdel="${qi}">삭제</button>`:''}
+          </div>
+          <div class="row2" style="align-items:center; margin-bottom:8px;">
+            <div>
+              ${isInternal
+                ? (full ? `<select data-qi="${qi}" class="q-side1">${colorOptionsHTML(q.side1)}</select>` : `<div style="font-size:12.5px;">${TEAM_COLOR_LABEL[q.side1]||''}</div>`)
+                : `<div style="font-size:12.5px;">공사랑FC</div>`}
+              ${full ? `<input type="number" data-qi="${qi}" class="q-score1" value="${q.score1||0}" placeholder="점수" style="margin-top:4px;">`
+                     : `<div style="font-size:16px; font-weight:700; margin-top:4px;">${q.score1||0}</div>`}
+            </div>
+            <div>
+              ${isInternal
+                ? (full ? `<select data-qi="${qi}" class="q-side2">${colorOptionsHTML(q.side2)}</select>` : `<div style="font-size:12.5px;">${TEAM_COLOR_LABEL[q.side2]||''}</div>`)
+                : `<div style="font-size:12.5px;">${escapeHTML(m.opponent||'상대팀')}</div>`}
+              ${full ? `<input type="number" data-qi="${qi}" class="q-score2" value="${q.score2||0}" placeholder="점수" style="margin-top:4px;">`
+                     : `<div style="font-size:16px; font-weight:700; margin-top:4px;">${q.score2||0}</div>`}
+            </div>
+          </div>
+          <div style="font-size:10.5px; color:var(--chalk-dim); margin-bottom:6px;">주요 이벤트</div>
+          <div class="q-events" data-qi="${qi}">
+            ${(q.events||[]).map((ev,ei)=>{
+              const mine = me && ev.memberId === me.id;
+              const editable = full || mine;
+              return `
+              <div class="row2" style="margin-bottom:6px; align-items:center; grid-template-columns:2fr 1fr auto;">
+                ${editable
+                  ? `<select data-qi="${qi}" data-ei="${ei}" class="ev-member" ${full?'':'disabled'}>${pool.map(mem=>`<option value="${mem.id}" ${ev.memberId===mem.id?'selected':''}>${escapeHTML(mem.name)}</option>`).join('')}</select>`
+                  : `<div style="font-size:12.5px; padding:6px 0;">${escapeHTML(memberName(ev.memberId))}</div>`}
+                ${editable
+                  ? `<select data-qi="${qi}" data-ei="${ei}" class="ev-type">${EVENT_TYPES.map(t=>`<option value="${t}" ${ev.type===t?'selected':''}>${t}</option>`).join('')}</select>`
+                  : `<div style="font-size:12.5px; padding:6px 0;">${ev.type}</div>`}
+                ${editable ? `<button class="btn btn-danger btn-sm" data-qi="${qi}" data-ei="${ei}" data-evdel="1">✕</button>` : `<span></span>`}
+              </div>`;
+            }).join('')}
+          </div>
+          ${(full || me) ? `<button class="btn btn-ghost btn-sm" data-qi="${qi}" data-evadd="1">${full?'+ 이벤트 추가':'+ 내 기록 추가'}</button>` : ''}
+        </div>
+      `).join('');
+    }
+
+    box.querySelectorAll('.q-side1').forEach(el=> el.addEventListener('change', e=>{ m.quarters[e.target.dataset.qi].side1 = e.target.value; }));
+    box.querySelectorAll('.q-side2').forEach(el=> el.addEventListener('change', e=>{ m.quarters[e.target.dataset.qi].side2 = e.target.value; }));
+    box.querySelectorAll('.q-score1').forEach(el=> el.addEventListener('input', e=>{ m.quarters[e.target.dataset.qi].score1 = Number(e.target.value)||0; }));
+    box.querySelectorAll('.q-score2').forEach(el=> el.addEventListener('input', e=>{ m.quarters[e.target.dataset.qi].score2 = Number(e.target.value)||0; }));
+    box.querySelectorAll('[data-qdel]').forEach(el=> el.addEventListener('click', e=>{
+      m.quarters.splice(Number(e.target.dataset.qdel),1);
+      renderQuarters();
+    }));
+    box.querySelectorAll('.ev-member').forEach(el=> el.addEventListener('change', e=>{ if(full) m.quarters[e.target.dataset.qi].events[e.target.dataset.ei].memberId = e.target.value; }));
+    box.querySelectorAll('.ev-type').forEach(el=> el.addEventListener('change', e=>{ m.quarters[e.target.dataset.qi].events[e.target.dataset.ei].type = e.target.value; }));
+    box.querySelectorAll('[data-evdel]').forEach(el=> el.addEventListener('click', e=>{
+      const qi = Number(e.target.dataset.qi), ei = Number(e.target.dataset.ei);
+      const ev = m.quarters[qi].events[ei];
+      if(!full && !(me && ev.memberId===me.id)){ showToast('본인 기록만 삭제할 수 있어요'); return; }
+      m.quarters[qi].events.splice(ei,1);
+      renderQuarters();
+    }));
+    box.querySelectorAll('[data-evadd]').forEach(el=> el.addEventListener('click', e=>{
+      const qi = Number(e.target.dataset.qi);
+      m.quarters[qi].events = m.quarters[qi].events || [];
+      if(full){
+        if(pool.length===0){ showToast('참석 인원이 없습니다'); return; }
+        m.quarters[qi].events.push({ memberId: pool[0].id, type:'득점' });
+      }else{
+        if(!me){ showToast('본인 확인(👤)을 먼저 해주세요'); return; }
+        m.quarters[qi].events.push({ memberId: me.id, type:'득점' });
+      }
+      renderQuarters();
     }));
   }
-  renderScorers();
+  renderQuarters();
 
-  document.getElementById('btnAddScorer').addEventListener('click', ()=>{
-    if(pool.length===0){ showToast('참석 인원이 없습니다'); return; }
-    m.result.scorers.push({ memberId: pool[0].id, goals:1, assists:0 });
-    renderScorers();
+  const addQBtn = document.getElementById('btnAddQuarter');
+  if(addQBtn) addQBtn.addEventListener('click', ()=>{
+    if(m.quarters.length >= MAX_QUARTERS){ showToast(`쿼터는 최대 ${MAX_QUARTERS}개까지예요`); return; }
+    const colors = modeColors || ['orange','yellow','black'];
+    const idx = m.quarters.length;
+    m.quarters.push(isInternal
+      ? { side1: colors[idx%colors.length], side2: colors[(idx+1)%colors.length], score1:0, score2:0, events:[] }
+      : { side1:'A', side2:'B', score1:0, score2:0, events:[] }
+    );
+    renderQuarters();
   });
 
   document.getElementById('btnSaveResult').addEventListener('click', async ()=>{
-    m.result.scoreA = Number(document.getElementById('f_scoreA').value)||0;
-    m.result.scoreB = Number(document.getElementById('f_scoreB').value)||0;
     m.result.mom = document.getElementById('f_mom').value || null;
     m.status = 'done';
     await saveMatches();
@@ -1210,20 +2045,17 @@ document.querySelectorAll('.lb-tabs .chip').forEach(chip=>{
 
 function computeStats(){
   const stats = {};
-  MEMBERS.forEach(m=> stats[m.id] = { id:m.id, name:m.name, number:m.number, goals:0, assists:0, apps:0, mom:0 });
+  activeRoster().forEach(m=> stats[m.id] = { id:m.id, name:m.name, number:m.number, goals:0, assists:0, saves:0, apps:0, mom:0 });
   MATCHES.filter(m=>m.status==='done').forEach(m=>{
-    const attendedIds = new Set();
-    (m.teams?.A||[]).forEach(id=>attendedIds.add(id));
-    (m.teams?.B||[]).forEach(id=>attendedIds.add(id));
-    if(attendedIds.size===0){
-      Object.keys(m.rsvp||{}).forEach(id=>{ if(m.rsvp[id]==='yes') attendedIds.add(id); });
-    }
+    const attendedIds = attendedIdsForMatch(m);
     attendedIds.forEach(id=>{ if(stats[id]) stats[id].apps++; });
-    (m.result?.scorers||[]).forEach(s=>{
-      if(stats[s.memberId]){
-        stats[s.memberId].goals += Number(s.goals)||0;
-        stats[s.memberId].assists += Number(s.assists)||0;
-      }
+    (m.quarters||[]).forEach(q=>{
+      (q.events||[]).forEach(ev=>{
+        if(!stats[ev.memberId]) return;
+        if(ev.type==='득점') stats[ev.memberId].goals++;
+        else if(ev.type==='도움') stats[ev.memberId].assists++;
+        else if(ev.type==='방어') stats[ev.memberId].saves++;
+      });
     });
     if(m.result?.mom && stats[m.result.mom]) stats[m.result.mom].mom++;
   });
@@ -1233,11 +2065,11 @@ function computeStats(){
 function renderLeaderboard(){
   const stats = computeStats().sort((a,b)=> b[lbMode]-a[lbMode] || a.name.localeCompare(b.name));
   const box = document.getElementById('leaderboard');
-  const labelMap = {goals:'골', assists:'도움', apps:'출석', mom:'MOM'};
+  const labelMap = {apps:'출석', goals:'득점', assists:'도움', saves:'방어', mom:'MOM'};
   const filtered = stats.filter(s=> s[lbMode] > 0);
   const showList = filtered.length ? filtered : stats.slice(0,0);
 
-  if(MEMBERS.length===0){
+  if(activeRoster().length===0){
     box.innerHTML = `<div class="empty"><p>회원을 먼저 등록해주세요.</p></div>`;
     return;
   }
@@ -1258,6 +2090,16 @@ function renderLeaderboard(){
 /* ============================================================
    회비결산 (팀 전체, 월단위)
    ============================================================ */
+function yearNetBalance(year){
+  let total = 0;
+  for(let mo=1; mo<=12; mo++) total += monthSettlement(year, mo).balance;
+  return total;
+}
+function carryoverBalance(year){
+  const years = availableYears().filter(y=>y<year);
+  return years.reduce((sum,y)=> sum + yearNetBalance(y), 0);
+}
+
 function renderDuesSettlement(){
   const years = availableYears();
   if(!years.includes(duesSettleYear)) duesSettleYear = years[years.length-1];
@@ -1277,11 +2119,14 @@ function renderDuesSettlement(){
   for(let mo=1; mo<=12; mo++) rows.push(monthSettlement(duesSettleYear, mo));
   const yearIncome = rows.reduce((s,r)=>s+r.income,0);
   const yearExpense = rows.reduce((s,r)=>s+r.expense,0);
+  const carryover = carryoverBalance(duesSettleYear);
+  const cumulativeBalance = carryover + yearIncome - yearExpense;
 
   document.getElementById('duesSummaryGrid').innerHTML = `
-    <div class="stat-box"><div class="n" style="font-size:16px;">${yearIncome.toLocaleString()}</div><div class="l">연간 수입(원)</div></div>
-    <div class="stat-box"><div class="n" style="font-size:16px;">${yearExpense.toLocaleString()}</div><div class="l">연간 지출(원)</div></div>
-    <div class="stat-box"><div class="n" style="font-size:16px; color:${(yearIncome-yearExpense)>=0?'var(--chalk)':'#FF9B92'};">${(yearIncome-yearExpense).toLocaleString()}</div><div class="l">순잔액(원)</div></div>
+    <div class="stat-box"><div class="n" style="font-size:15px; color:${carryover>=0?'var(--chalk)':'#FF9B92'};">${carryover.toLocaleString()}</div><div class="l">전년이월(원)</div></div>
+    <div class="stat-box"><div class="n" style="font-size:15px;">${yearIncome.toLocaleString()}</div><div class="l">연간 수입(원)</div></div>
+    <div class="stat-box"><div class="n" style="font-size:15px;">${yearExpense.toLocaleString()}</div><div class="l">연간 지출(원)</div></div>
+    <div class="stat-box"><div class="n" style="font-size:15px; color:${cumulativeBalance>=0?'var(--chalk)':'#FF9B92'};">${cumulativeBalance.toLocaleString()}</div><div class="l">누적잔액(원)</div></div>
   `;
 
   document.getElementById('duesLedger').innerHTML = rows.map(r=>`
@@ -1292,14 +2137,101 @@ function renderDuesSettlement(){
       <span class="ledger-val" style="color:${r.balance>=0?'var(--chalk)':'#FF9B92'};">${r.balance.toLocaleString()}</span>
     </div>
   `).join('');
+
+  const yearExpenseByCategory = {};
+  EXPENSE_CATEGORIES.forEach(c=> yearExpenseByCategory[c] = 0);
+  rows.forEach(r=>{ EXPENSE_CATEGORIES.forEach(c=> yearExpenseByCategory[c] += (r.byCategory?.[c]||0)); });
+  document.getElementById('expenseCategoryGrid').innerHTML = `
+    <div style="display:grid; grid-template-columns:repeat(5,1fr); gap:6px; text-align:center;">
+      ${EXPENSE_CATEGORIES.map(c=>`
+        <div>
+          <div style="font-size:10px; color:var(--chalk-dim);">${c}</div>
+          <div style="font-size:12px; font-weight:700; font-family:'JetBrains Mono',monospace;">${(yearExpenseByCategory[c]||0).toLocaleString()}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+
+  const yearExpenseEntries = EXPENSES.filter(x=> x.date && new Date(x.date).getFullYear()===duesSettleYear)
+    .sort((a,b)=> new Date(b.date)-new Date(a.date));
+  const expenseListEl = document.getElementById('expenseList');
+  if(!yearExpenseEntries.length){
+    expenseListEl.innerHTML = `<div class="empty" style="padding:20px 10px;"><p>등록된 지출 내역이 없습니다.</p></div>`;
+  }else{
+    expenseListEl.innerHTML = yearExpenseEntries.map(x=>`
+      <div class="member-row" data-eid="${x.id}">
+        <div class="jersey" style="width:34px;height:34px;font-size:9.5px;">${x.category}</div>
+        <div class="member-info">
+          <div class="name" style="font-size:13px;">${Number(x.amount).toLocaleString()}원</div>
+          <div class="sub">${x.date}${x.note?' · '+escapeHTML(x.note):''}</div>
+        </div>
+        <button class="btn btn-danger btn-sm" data-expdel="${x.id}">삭제</button>
+      </div>
+    `).join('');
+    expenseListEl.querySelectorAll('[data-expdel]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        if(!isExec()){ showToast('지출 삭제는 집행부만 할 수 있어요'); return; }
+        const ok = await requireAdminPin('지출 내역 삭제');
+        if(!ok) return;
+        EXPENSES = EXPENSES.filter(x=>x.id!==btn.dataset.expdel);
+        await saveExpenses();
+        renderDuesSettlement();
+        showToast('지출 내역을 삭제했습니다');
+      });
+    });
+  }
+}
+
+function openExpenseForm(){
+  const today = new Date().toISOString().slice(0,10);
+  const html = `
+    <div class="modal-head"><h3>지출 추가</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <label>날짜</label>
+    <input type="date" id="f_expDate" value="${today}">
+    <label>분류</label>
+    <div class="chip-select" id="f_expCategory">
+      ${EXPENSE_CATEGORIES.map((c,i)=>`<div class="chip ${i===0?'active':''}" data-val="${c}">${c}</div>`).join('')}
+    </div>
+    <label>금액(원)</label>
+    <input type="number" id="f_expAmount" placeholder="예: 50000">
+    <label>메모 (선택)</label>
+    <input type="text" id="f_expNote" placeholder="예: 7월 정기 대관비">
+    <div class="modal-foot">
+      <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary btn-block" id="btnSaveExpense">저장</button>
+    </div>
+  `;
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('overlay').classList.add('active');
+  bindChipGroup('f_expCategory');
+
+  document.getElementById('btnSaveExpense').addEventListener('click', async ()=>{
+    const date = document.getElementById('f_expDate').value;
+    const amount = Number(document.getElementById('f_expAmount').value)||0;
+    if(!date){ showToast('날짜를 선택해주세요'); return; }
+    if(amount<=0){ showToast('금액을 입력해주세요'); return; }
+    EXPENSES.push({
+      id: uid('exp'),
+      date,
+      category: getActiveChip('f_expCategory') || '기타',
+      amount,
+      note: document.getElementById('f_expNote').value.trim()
+    });
+    await saveExpenses();
+    closeModal();
+    renderDuesSettlement();
+    showToast('지출 내역을 저장했습니다');
+  });
 }
 
 function openDuesSettingsForm(){
   const html = `
     <div class="modal-head"><h3>회비 설정</h3><button class="close-x" onclick="closeModal()">✕</button></div>
-    <div class="match-meta" style="margin-bottom:8px;">1인당 월 회비 금액을 설정하면 회비결산의 수입이 자동 계산돼요.</div>
+    <div class="match-meta" style="margin-bottom:8px;">1인당 월 회비 금액과 관리자 PIN을 설정할 수 있어요.</div>
     <label>월 회비 금액(원)</label>
     <input type="number" id="f_monthlyDues" value="${SETTINGS.monthlyDues||0}" placeholder="예: 30000">
+    <label>관리자 PIN (회원/경기 삭제, 회비·지출 관리 시 필요 · 비워두면 잠금 없음)</label>
+    <input type="password" id="f_adminPin" inputmode="numeric" value="${SETTINGS.adminPin||''}" placeholder="예: 1234">
     <div class="modal-foot">
       <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
       <button class="btn btn-primary btn-block" id="btnSaveDuesSettings">저장</button>
@@ -1310,12 +2242,227 @@ function openDuesSettingsForm(){
 
   document.getElementById('btnSaveDuesSettings').addEventListener('click', async ()=>{
     SETTINGS.monthlyDues = Number(document.getElementById('f_monthlyDues').value) || 0;
+    SETTINGS.adminPin = document.getElementById('f_adminPin').value.trim();
     await saveSettings();
     closeModal();
     renderAll();
     showToast('회비 설정을 저장했습니다');
   });
 }
+
+/* ============================================================
+   활동 리포트 생성 (월/분기/반기/연간)
+   ============================================================ */
+function periodRange(unit, year, sub){
+  let startMonth, endMonth, label;
+  if(unit === 'month'){ startMonth = sub; endMonth = sub; label = `${year}년 ${sub}월`; }
+  else if(unit === 'quarter'){ startMonth = (sub-1)*3+1; endMonth = startMonth+2; label = `${year}년 ${sub}분기`; }
+  else if(unit === 'half'){ startMonth = sub===1?1:7; endMonth = sub===1?6:12; label = `${year}년 ${sub===1?'상반기':'하반기'}`; }
+  else { startMonth = 1; endMonth = 12; label = `${year}년 연간`; }
+  const start = new Date(year, startMonth-1, 1, 0,0,0);
+  const end = new Date(year, endMonth, 0, 23,59,59);
+  return { start, end, label, unit, year, startMonth, endMonth };
+}
+function inRange(dateStr, range){
+  if(!dateStr) return false;
+  const d = new Date(dateStr);
+  return d >= range.start && d <= range.end;
+}
+
+function computePeriodMemberStats(range){
+  const stats = {};
+  activeRoster().forEach(m=> stats[m.id] = { id:m.id, name:m.name, number:m.number, role:m.role, apps:0, goals:0, assists:0, saves:0, mom:0, rsvpYes:0 });
+  MATCHES.forEach(m=>{
+    if(!inRange(m.date, range)) return;
+    Object.keys(m.rsvp||{}).forEach(id=>{ if(stats[id] && rsvpStatus(m,id)==='yes') stats[id].rsvpYes++; });
+    if(m.status !== 'done') return;
+    attendedIdsForMatch(m).forEach(id=>{ if(stats[id]) stats[id].apps++; });
+    (m.quarters||[]).forEach(q=>{
+      (q.events||[]).forEach(ev=>{
+        if(!stats[ev.memberId]) return;
+        if(ev.type==='득점') stats[ev.memberId].goals++;
+        else if(ev.type==='도움') stats[ev.memberId].assists++;
+        else if(ev.type==='방어') stats[ev.memberId].saves++;
+      });
+    });
+    if(m.result?.mom && stats[m.result.mom]) stats[m.result.mom].mom++;
+  });
+  return Object.values(stats).sort((a,b)=> b.apps-a.apps || b.goals-a.goals || a.name.localeCompare(b.name));
+}
+
+function buildReportHTML(range){
+  const matchesInRange = MATCHES.filter(m => inRange(m.date, range)).sort((a,b)=> new Date(a.date)-new Date(b.date));
+  const doneMatches = matchesInRange.filter(m=>m.status==='done');
+  const internalCount = matchesInRange.filter(m=>m.matchType==='internal').length;
+  const externalCount = matchesInRange.filter(m=>m.matchType!=='internal').length;
+  const totalQuarters = doneMatches.reduce((s,m)=> s + (m.quarters?.length||0), 0);
+
+  const matchRowsHTML = matchesInRange.map(m=>{
+    const isInternal = m.matchType==='internal';
+    const typeLabel = isInternal ? '자체경기' : `외부매칭 vs ${escapeHTML(m.opponent||'상대팀')}`;
+    const quarterHTML = (m.quarters||[]).map((q,qi)=>{
+      const l1 = isInternal ? (TEAM_COLOR_LABEL[q.side1]||q.side1) : '공사랑FC';
+      const l2 = isInternal ? (TEAM_COLOR_LABEL[q.side2]||q.side2) : (m.opponent||'상대팀');
+      return `<div>Q${qi+1}. ${l1} ${q.score1||0} : ${q.score2||0} ${l2}</div>`;
+    }).join('') || '<div style="color:#999;">쿼터 기록 없음</div>';
+    return `
+      <tr>
+        <td>${m.date}${m.time?' '+m.time:''}</td>
+        <td>${typeLabel}</td>
+        <td>${escapeHTML(m.location||'-')}</td>
+        <td>${m.status==='done'?'종료':'예정'}</td>
+        <td>${(m.quarters||[]).length}쿼터</td>
+        <td style="text-align:left;">${quarterHTML}</td>
+      </tr>`;
+  }).join('') || `<tr><td colspan="6" style="text-align:center; color:#999;">해당 기간에 등록된 경기가 없습니다.</td></tr>`;
+
+  const months = [];
+  for(let d = new Date(range.start.getFullYear(), range.start.getMonth(), 1); d <= range.end; d.setMonth(d.getMonth()+1)){
+    months.push({ year: d.getFullYear(), month: d.getMonth()+1 });
+  }
+  const monthRows = months.map(({year,month}) => monthSettlement(year, month));
+  const totalIncome = monthRows.reduce((s,r)=>s+r.income,0);
+  const totalExpense = monthRows.reduce((s,r)=>s+r.expense,0);
+  const catTotals = {};
+  EXPENSE_CATEGORIES.forEach(c=> catTotals[c]=0);
+  monthRows.forEach(r=> EXPENSE_CATEGORIES.forEach(c=> catTotals[c] += (r.byCategory?.[c]||0)));
+  const budgetRowsHTML = months.map(({year,month},i)=>{
+    const r = monthRows[i];
+    return `<tr><td>${year}.${String(month).padStart(2,'0')}</td><td>${r.income.toLocaleString()}</td><td>${r.expense.toLocaleString()}</td><td>${r.balance.toLocaleString()}</td></tr>`;
+  }).join('');
+
+  const memberStats = computePeriodMemberStats(range);
+  const memberRowsHTML = memberStats.map((s,i)=>`
+    <tr>
+      <td>${i+1}</td><td>${escapeHTML(s.name)}</td><td>${s.role}</td>
+      <td>${s.rsvpYes}</td><td>${s.apps}</td><td>${s.goals}</td><td>${s.assists}</td><td>${s.saves}</td><td>${s.mom}</td>
+    </tr>`).join('') || `<tr><td colspan="9" style="text-align:center; color:#999;">데이터가 없습니다.</td></tr>`;
+
+  const genAt = new Date().toLocaleString('ko-KR');
+
+  return `<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8">
+<title>공사랑FC 활동 리포트 - ${range.label}</title>
+<style>
+  body{ font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif; color:#1a1a1a; max-width:900px; margin:0 auto; padding:32px 20px; line-height:1.5; }
+  h1{ font-size:22px; border-bottom:3px solid #0A1B3D; padding-bottom:10px; }
+  h2{ font-size:16px; color:#0A1B3D; margin-top:32px; border-left:5px solid #E8B74D; padding-left:10px; }
+  .meta{ color:#666; font-size:12px; margin-bottom:20px; }
+  table{ width:100%; border-collapse:collapse; font-size:12.5px; margin-top:10px; }
+  th,td{ border:1px solid #ddd; padding:7px 8px; text-align:center; }
+  th{ background:#0A1B3D; color:#fff; }
+  tr:nth-child(even){ background:#f7f7f7; }
+  .summary{ display:flex; gap:12px; margin-top:12px; flex-wrap:wrap; }
+  .summary div{ background:#f2f0e6; border-radius:8px; padding:10px 16px; font-size:13px; }
+  .summary b{ display:block; font-size:18px; color:#0A1B3D; }
+  @media print{ body{ padding:0; } }
+</style>
+</head><body>
+  <h1>⚽ 공사랑FC 활동 리포트</h1>
+  <div class="meta">기간: ${range.label} (${range.start.toISOString().slice(0,10)} ~ ${range.end.toISOString().slice(0,10)}) · 생성일시: ${genAt}</div>
+
+  <h2>1. 팀 활동현황</h2>
+  <div class="summary">
+    <div><b>${matchesInRange.length}</b>총 경기 수</div>
+    <div><b>${internalCount}</b>자체경기</div>
+    <div><b>${externalCount}</b>외부매칭</div>
+    <div><b>${totalQuarters}</b>누적 쿼터 수</div>
+  </div>
+  <table>
+    <tr><th>날짜</th><th>유형</th><th>장소</th><th>상태</th><th>쿼터수</th><th>쿼터별 결과</th></tr>
+    ${matchRowsHTML}
+  </table>
+
+  <h2>2. 예산집행현황</h2>
+  <div class="summary">
+    <div><b>${totalIncome.toLocaleString()}</b>기간 수입(원)</div>
+    <div><b>${totalExpense.toLocaleString()}</b>기간 지출(원)</div>
+    <div><b>${(totalIncome-totalExpense).toLocaleString()}</b>기간 잔액(원)</div>
+  </div>
+  <table>
+    <tr><th>월</th><th>수입</th><th>지출</th><th>잔액</th></tr>
+    ${budgetRowsHTML}
+  </table>
+  <table style="margin-top:14px;">
+    <tr>${EXPENSE_CATEGORIES.map(c=>`<th>${c}</th>`).join('')}</tr>
+    <tr>${EXPENSE_CATEGORIES.map(c=>`<td>${(catTotals[c]||0).toLocaleString()}</td>`).join('')}</tr>
+  </table>
+
+  <h2>3. 개인별 활동현황</h2>
+  <table>
+    <tr><th>순위</th><th>이름</th><th>직책</th><th>참석신청</th><th>출석</th><th>득점</th><th>도움</th><th>방어</th><th>MOM</th></tr>
+    ${memberRowsHTML}
+  </table>
+
+  <p style="margin-top:30px; color:#999; font-size:11px;">본 리포트는 공사랑FC 앱에서 자동 생성되었습니다.</p>
+</body></html>`;
+}
+
+function openReportModal(){
+  const now = new Date();
+  const html = `
+    <div class="modal-head"><h3>활동 리포트 생성</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <label>기간 단위</label>
+    <div class="chip-select" id="f_reportUnit">
+      <div class="chip active" data-val="month">월간</div>
+      <div class="chip" data-val="quarter">분기</div>
+      <div class="chip" data-val="half">반기</div>
+      <div class="chip" data-val="year">연간</div>
+    </div>
+    <div class="row2">
+      <div><label>연도</label><input type="number" id="f_reportYear" value="${now.getFullYear()}"></div>
+      <div id="reportSubField"><label>월</label>
+        <select id="f_reportSub">
+          ${Array.from({length:12},(_,i)=>i+1).map(mo=>`<option value="${mo}" ${mo===now.getMonth()+1?'selected':''}>${mo}월</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary btn-block" id="btnGenerateReport">리포트 다운로드</button>
+    </div>
+  `;
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('overlay').classList.add('active');
+  bindChipGroup('f_reportUnit');
+
+  function updateSubField(){
+    const unit = getActiveChip('f_reportUnit');
+    const field = document.getElementById('reportSubField');
+    if(unit === 'month'){
+      field.innerHTML = `<label>월</label><select id="f_reportSub">${Array.from({length:12},(_,i)=>i+1).map(mo=>`<option value="${mo}" ${mo===now.getMonth()+1?'selected':''}>${mo}월</option>`).join('')}</select>`;
+    }else if(unit === 'quarter'){
+      const q = Math.floor(now.getMonth()/3)+1;
+      field.innerHTML = `<label>분기</label><select id="f_reportSub">${[1,2,3,4].map(n=>`<option value="${n}" ${n===q?'selected':''}>${n}분기</option>`).join('')}</select>`;
+    }else if(unit === 'half'){
+      const h = now.getMonth()<6 ? 1 : 2;
+      field.innerHTML = `<label>반기</label><select id="f_reportSub">${[1,2].map(n=>`<option value="${n}" ${n===h?'selected':''}>${n===1?'상반기':'하반기'}</option>`).join('')}</select>`;
+    }else{
+      field.innerHTML = `<label>&nbsp;</label><div style="font-size:12px; color:var(--chalk-dim); padding-top:10px;">연간 전체</div>`;
+    }
+  }
+
+  document.querySelectorAll('#f_reportUnit .chip').forEach(chip=> chip.addEventListener('click', updateSubField));
+
+  document.getElementById('btnGenerateReport').addEventListener('click', ()=>{
+    const unit = getActiveChip('f_reportUnit') || 'month';
+    const year = Number(document.getElementById('f_reportYear').value) || now.getFullYear();
+    const subEl = document.getElementById('f_reportSub');
+    const sub = subEl ? Number(subEl.value) : 1;
+    const range = periodRange(unit, year, sub);
+    const reportSrc = buildReportHTML(range);
+    const blob = new Blob([reportSrc], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `공사랑FC_리포트_${range.label.replace(/\s/g,'')}.html`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 4000);
+    closeModal();
+    showToast('리포트 파일을 다운로드했어요. 파일을 열어 확인하거나 인쇄해서 PDF로 저장할 수 있어요');
+  });
+}
+document.getElementById('btnOpenReport').addEventListener('click', openReportModal);
 
 /* ============================================================
    유틸
