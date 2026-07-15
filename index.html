@@ -111,7 +111,7 @@
     margin-bottom:10px;
   }
   .stat-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:4px;}
-  #duesSummaryGrid{grid-template-columns:repeat(4,1fr);}
+  #duesSummaryGrid{grid-template-columns:repeat(3,1fr);}
   .stat-box{
     background:rgba(0,0,0,0.18); border:1px solid var(--line-white); border-radius:12px;
     padding:12px 8px; text-align:center;
@@ -1250,8 +1250,8 @@ function renderMemberDetail(m, years){
       <div class="month-grid">${h1.map(monthCellHTML).join('')}</div>
       <div class="half-label">하반기 (7~12월) <b>${h2paid}/6 납부</b></div>
       <div class="month-grid">${h2.map(monthCellHTML).join('')}</div>
-      <div style="font-size:10.5px; color:var(--chalk-dim); margin:10px 0;">칸을 눌러 납부 여부를 바로 변경할 수 있어요. 아직 지나지 않은 달도 선납 등록이 가능해요.</div>
-      <button class="btn btn-primary btn-sm btn-block" id="btnBulkPrepay">📅 선납 일괄 등록</button>
+      <div style="font-size:10.5px; color:var(--chalk-dim); margin:10px 0;">칸을 눌러 한 달씩 바로 변경할 수 있어요. 여러 달을 한 번에 등록·수정하려면 아래 버튼을 이용하세요.</div>
+      <button class="btn btn-primary btn-sm btn-block" id="btnBulkPrepay">📅 회비 일괄 등록/수정</button>
     </div>
   `;
 
@@ -1273,8 +1273,8 @@ function renderMemberDetail(m, years){
 
   const bulkBtn = document.getElementById('btnBulkPrepay');
   if(bulkBtn) bulkBtn.addEventListener('click', async ()=>{
-    if(!isExec()){ showToast('선납 등록은 집행부만 할 수 있어요'); return; }
-    const ok = await requireAdminPin('선납 일괄 등록');
+    if(!isExec()){ showToast('회비 일괄 등록/수정은 집행부만 할 수 있어요'); return; }
+    const ok = await requireAdminPin('회비 일괄 등록/수정');
     if(!ok) return;
     openBulkPrepayForm(m, years);
   });
@@ -1284,9 +1284,14 @@ function openBulkPrepayForm(m, years){
   const now = new Date();
   const defaultStartMonth = detailYear === now.getFullYear() ? now.getMonth()+1 : 1;
   const html = `
-    <div class="modal-head"><h3>선납 일괄 등록</h3><button class="close-x" onclick="closeModal()">✕</button></div>
-    <div class="match-meta" style="margin-bottom:10px;">${escapeHTML(m.name)}님의 ${detailYear}년 회비를 여러 달 한 번에 납부완료로 등록해요.</div>
-    <div class="row2">
+    <div class="modal-head"><h3>회비 일괄 등록/수정</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="match-meta" style="margin-bottom:10px;">${escapeHTML(m.name)}님의 ${detailYear}년 회비를 여러 달 한 번에 등록·수정해요. 매달 회비가 동일하므로 상태만 골라 범위를 한 번에 적용하면 돼요.</div>
+    <label>상태</label>
+    <div class="chip-select" id="f_prepayStatus">
+      <div class="chip active" data-val="paid">납부완료</div>
+      <div class="chip" data-val="unpaid">미납</div>
+    </div>
+    <div class="row2" style="margin-top:10px;">
       <div><label>시작 월</label>
         <select id="f_prepayStart">
           ${Array.from({length:12},(_,i)=>i+1).map(mo=>`<option value="${mo}" ${mo===defaultStartMonth?'selected':''}>${mo}월</option>`).join('')}
@@ -1294,24 +1299,26 @@ function openBulkPrepayForm(m, years){
       </div>
       <div><label>개월 수</label><input type="number" id="f_prepayCount" value="12" min="1" max="12"></div>
     </div>
-    <div style="font-size:11px; color:var(--chalk-dim); margin-top:6px;">예: 7월부터 12개월 선택 시 다음 해 6월까지 자동으로 이어서 등록돼요.</div>
+    <div style="font-size:11px; color:var(--chalk-dim); margin-top:6px;">예: 7월부터 12개월 선택 시 다음 해 6월까지 자동으로 이어서 적용돼요.</div>
     <div class="modal-foot">
       <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary btn-block" id="btnConfirmPrepay">등록</button>
+      <button class="btn btn-primary btn-block" id="btnConfirmPrepay">적용</button>
     </div>
   `;
   document.getElementById('modalBody').innerHTML = html;
   document.getElementById('overlay').classList.add('active');
+  bindChipGroup('f_prepayStatus');
 
   document.getElementById('btnConfirmPrepay').addEventListener('click', async ()=>{
     const startMonth = Number(document.getElementById('f_prepayStart').value);
     const count = Math.min(60, Math.max(1, Number(document.getElementById('f_prepayCount').value)||1));
+    const paid = getActiveChip('f_prepayStatus') === 'paid';
     m.dues = m.dues || {};
     const prevDues = {...m.dues};
     let y = detailYear, mo = startMonth;
     for(let i=0; i<count; i++){
       const key = y + '-' + String(mo).padStart(2,'0');
-      m.dues[key] = true;
+      m.dues[key] = paid;
       mo++;
       if(mo>12){ mo=1; y++; }
     }
@@ -1320,7 +1327,7 @@ function openBulkPrepayForm(m, years){
     closeModal();
     renderMemberDetail(m, years);
     renderAll();
-    showToast(`${count}개월치 선납을 등록했어요`);
+    showToast(`${count}개월치를 '${paid?'납부완료':'미납'}'으로 일괄 적용했어요`);
   });
 }
 
@@ -1435,7 +1442,6 @@ function openMemberForm(id){
     return;
   }
 
-  const mk = todayMonthKey();
   const canEditRoleAndDues = !m || isExec(); // 직책(주장/부주장 등 일반)/회비/등번호는 집행부만 확정 가능
   if(m) migrateRoles(m);
   const roleFullyLocked = !!(m && m.roles.some(r=>COUNCIL_ROLES.includes(r)) && !isSelf(m.id)); // 타인의 회장/고문 직책은 해임절차로만 변경 가능
@@ -1484,13 +1490,6 @@ function openMemberForm(id){
 
     ${m ? renderPracticalRoleRequestSection(m) : ''}
 
-    ${canEditRoleAndDues ? `
-    <label>이번 달(${mk}) 회비 납부</label>
-    <div class="chip-select" id="f_dues">
-      <div class="chip ${m&&m.dues&&m.dues[mk]?'active':''}" data-val="paid">납부완료</div>
-      <div class="chip ${!(m&&m.dues&&m.dues[mk])?'active':''}" data-val="unpaid">미납</div>
-    </div>` : ''}
-
     ${(m && isSelf(m.id) && m.status!=='pending') ? renderLeaderRequestSection(m) : ''}
     ${(m && isExec() && !isSelf(m.id) && (m.roles||[]).some(r=>COUNCIL_ROLES.includes(r))) ? renderRemovalSection(m) : ''}
 
@@ -1528,7 +1527,6 @@ function openMemberForm(id){
         chip.classList.toggle('active');
       });
     });
-    bindChipGroup('f_dues');
   }
   bindLeaderRequestButtons(m);
 
@@ -1572,8 +1570,6 @@ function openMemberForm(id){
       if(canEditRoleAndDues){
         m.number = number?Number(number):null;
         m.roles = [...councilRoles, ...currentPracticalRoles, ...newOtherRoles];
-        m.dues = m.dues || {};
-        m.dues[mk] = getActiveChip('f_dues') === 'paid';
       }
       m.privacyConsent = true;
       if(!m.privacyConsentAt) m.privacyConsentAt = new Date().toISOString();
@@ -2362,13 +2358,37 @@ function renderDuesSettlement(){
   const yearIncome = rows.reduce((s,r)=>s+r.income,0);
   const yearExpense = rows.reduce((s,r)=>s+r.expense,0);
   const carryover = carryoverBalance(duesSettleYear);
-  const cumulativeBalance = carryover + yearIncome - yearExpense;
+
+  // 오늘 기준으로 이 연도에서 '확정'으로 볼 수 있는 마지막 달을 정함
+  const now = new Date();
+  const curYear = now.getFullYear(), curMonth = now.getMonth()+1;
+  let cutoffMonth;
+  if(duesSettleYear < curYear) cutoffMonth = 12;      // 지난 연도: 12월까지 전부 확정
+  else if(duesSettleYear === curYear) cutoffMonth = curMonth; // 올해: 이번 달까지 확정
+  else cutoffMonth = 0;                                // 미래 연도: 아직 확정된 달 없음
+
+  // 각 행에 누적잔액(확정분만)을 계산하고, 확정 이후 달은 공란 + 선입금 누계로 분리
+  let running = carryover;
+  let prepayIncome = 0;
+  rows.forEach(r=>{
+    if(r.month <= cutoffMonth){
+      running += r.balance;
+      r.cumBalance = running;
+    }else{
+      r.cumBalance = null; // 아직 지나지 않은 달 → 공란
+      prepayIncome += r.income; // 이미 선납된 금액은 선입금으로 별도 집계
+    }
+  });
+  const confirmedCumulative = running; // 당월까지 확정된 누적잔액
+  const cashOnHand = confirmedCumulative + prepayIncome; // 확정 + 선입금 = 현재 시점 실제 현금흐름 잔액
 
   document.getElementById('duesSummaryGrid').innerHTML = `
     <div class="stat-box"><div class="n" style="font-size:15px; color:${carryover>=0?'var(--chalk)':'#FF9B92'};">${carryover.toLocaleString()}</div><div class="l">전년이월(원)</div></div>
     <div class="stat-box"><div class="n" style="font-size:15px;">${yearIncome.toLocaleString()}</div><div class="l">연간 수입(원)</div></div>
     <div class="stat-box"><div class="n" style="font-size:15px;">${yearExpense.toLocaleString()}</div><div class="l">연간 지출(원)</div></div>
-    <div class="stat-box"><div class="n" style="font-size:15px; color:${cumulativeBalance>=0?'var(--chalk)':'#FF9B92'};">${cumulativeBalance.toLocaleString()}</div><div class="l">누적잔액(원)</div></div>
+    <div class="stat-box"><div class="n" style="font-size:15px; color:${confirmedCumulative>=0?'var(--chalk)':'#FF9B92'};">${confirmedCumulative.toLocaleString()}</div><div class="l">누적잔액(확정,당월까지)</div></div>
+    <div class="stat-box"><div class="n" style="font-size:15px; color:var(--gold);">${prepayIncome.toLocaleString()}</div><div class="l">누적선입금(미래월분)</div></div>
+    <div class="stat-box"><div class="n" style="font-size:15px; color:${cashOnHand>=0?'var(--chalk)':'#FF9B92'};">${cashOnHand.toLocaleString()}</div><div class="l">현재 현금잔액(확정+선입금)</div></div>
   `;
 
   document.getElementById('duesLedger').innerHTML = rows.map(r=>`
@@ -2376,7 +2396,7 @@ function renderDuesSettlement(){
       <span class="ledger-mo">${r.month}월</span>
       <span class="ledger-val pos">+${r.income.toLocaleString()}</span>
       <span class="ledger-val neg">${r.expense>0?'-':''}${r.expense.toLocaleString()}</span>
-      <span class="ledger-val" style="color:${r.balance>=0?'var(--chalk)':'#FF9B92'};">${r.balance.toLocaleString()}</span>
+      <span class="ledger-val" style="color:${r.cumBalance===null?'var(--chalk-dim)':(r.cumBalance>=0?'var(--chalk)':'#FF9B92')};">${r.cumBalance===null?'-':r.cumBalance.toLocaleString()}</span>
     </div>
   `).join('');
 
