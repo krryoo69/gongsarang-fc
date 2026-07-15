@@ -636,6 +636,32 @@ async function loadData(){
 async function saveMembers(){
   return await dbSetWithRetry('members', JSON.stringify(MEMBERS), '회원');
 }
+// 회비 등록/수정 전용: 저장 직전 서버 최신 회원 데이터를 다시 불러와 그 위에
+// 지금 변경하려는 회비만 반영해서 저장한다. 로컬에 남아있던(오래됐을 수 있는)
+// MEMBERS 스냅샷을 그대로 덮어쓰면 다른 세션에서 먼저 등록한 다른 회원의
+// 회비가 조용히 사라지는 문제가 있어, 이를 막기 위한 재조회-병합-저장 패턴.
+async function saveMemberDuesPatch(memberId, applyFn){
+  let freshMembers;
+  try{
+    const res = await dbGet('members');
+    freshMembers = res ? JSON.parse(res.value) : [];
+    freshMembers.forEach(migrateRoles);
+  }catch(e){
+    showToast('최신 회원 데이터를 불러오지 못해 저장을 취소했어요: ' + e.message);
+    return { ok:false };
+  }
+  const freshMember = freshMembers.find(x=>x.id===memberId);
+  if(!freshMember){
+    showToast('서버에서 해당 회원을 찾지 못했어요');
+    return { ok:false };
+  }
+  freshMember.dues = freshMember.dues || {};
+  applyFn(freshMember);
+  const ok = await dbSetWithRetry('members', JSON.stringify(freshMembers), '회원');
+  if(!ok) return { ok:false };
+  MEMBERS = freshMembers; // 로컬 상태도 서버 최신본으로 동기화
+  return { ok:true, member: freshMember };
+}
 async function saveMatches(){
   return await dbSetWithRetry('matches', JSON.stringify(MATCHES), '경기');
 }
@@ -1261,11 +1287,9 @@ function renderMemberDetail(m, years){
       const ok = await requireAdminPin('회비 납부 상태 변경');
       if(!ok) return;
       const key = cell.dataset.key;
-      m.dues = m.dues || {};
-      const prevVal = m.dues[key];
-      m.dues[key] = !m.dues[key];
-      const saved = await saveMembers();
-      if(!saved){ m.dues[key] = prevVal; } // 저장 실패 시 되돌림
+      const result = await saveMemberDuesPatch(m.id, (freshM)=>{ freshM.dues[key] = !freshM.dues[key]; });
+      if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+      m.dues = result.member.dues; // 화면에 표시 중인 참조도 최신값으로 갱신
       renderMemberDetail(m, years);
       renderAll();
     });
@@ -1313,17 +1337,18 @@ function openBulkPrepayForm(m, years){
     const startMonth = Number(document.getElementById('f_prepayStart').value);
     const count = Math.min(60, Math.max(1, Number(document.getElementById('f_prepayCount').value)||1));
     const paid = getActiveChip('f_prepayStatus') === 'paid';
-    m.dues = m.dues || {};
-    const prevDues = {...m.dues};
+    const keys = [];
     let y = detailYear, mo = startMonth;
     for(let i=0; i<count; i++){
-      const key = y + '-' + String(mo).padStart(2,'0');
-      m.dues[key] = paid;
+      keys.push(y + '-' + String(mo).padStart(2,'0'));
       mo++;
       if(mo>12){ mo=1; y++; }
     }
-    const ok = await saveMembers();
-    if(!ok){ m.dues = prevDues; renderMemberDetail(m, years); renderAll(); return; }
+    const result = await saveMemberDuesPatch(m.id, (freshM)=>{
+      keys.forEach(key=>{ freshM.dues[key] = paid; });
+    });
+    if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+    m.dues = result.member.dues;
     closeModal();
     renderMemberDetail(m, years);
     renderAll();
