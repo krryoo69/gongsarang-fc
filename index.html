@@ -131,6 +131,7 @@
     font-size:9.5px; padding:2px 8px; border-radius:20px; letter-spacing:0.5px; font-weight:600;
   }
   .match-status.upcoming{background:rgba(47,99,184,0.25); color:#8FB8F0; border:1px solid rgba(143,184,240,0.3);}
+  .match-status.live{background:rgba(70,180,110,0.2); color:#7FDDA0; border:1px solid rgba(127,221,160,0.35);}
   .match-status.done{background:rgba(232,163,61,0.18); color:var(--gold); border:1px solid rgba(232,163,61,0.3);}
   .match-body{padding:14px;}
   .match-vs{display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;}
@@ -664,6 +665,35 @@ async function saveMemberDuesPatch(memberId, applyFn){
 }
 async function saveMatches(){
   return await dbSetWithRetry('matches', JSON.stringify(MATCHES), '경기');
+}
+// 경기결과(쿼터/이벤트/상태) 저장 전용: 회비와 동일하게 저장 직전 서버 최신본을 다시 불러와
+// 그 위에 지금 변경분만 반영해서 저장한다. 진행중 경기는 여러 명이 거의 동시에
+// 각자 기록을 추가할 수 있어, 통짜 덮어쓰기 방식이면 서로의 기록이 사라질 수 있다.
+async function saveMatchPatch(matchId, applyFn){
+  let freshMatches;
+  try{
+    const res = await dbGet('matches');
+    freshMatches = res ? JSON.parse(res.value) : [];
+  }catch(e){
+    showToast('최신 경기 데이터를 불러오지 못해 저장을 취소했어요: ' + e.message);
+    return { ok:false };
+  }
+  const freshMatch = freshMatches.find(x=>x.id===matchId);
+  if(!freshMatch){
+    showToast('서버에서 해당 경기를 찾지 못했어요');
+    return { ok:false };
+  }
+  if(!freshMatch.quarters) freshMatch.quarters = [];
+  if(!freshMatch.result) freshMatch.result = { mom:null };
+  applyFn(freshMatch);
+  const ok = await dbSetWithRetry('matches', JSON.stringify(freshMatches), '경기');
+  if(!ok) return { ok:false };
+  MATCHES = freshMatches; // 로컬 상태도 서버 최신본으로 동기화
+  return { ok:true, match: freshMatch };
+}
+function matchSideKeys(m){
+  if(m.matchType==='internal') return m.teamMode===3 ? ['orange','yellow','black'] : ['orange','yellow'];
+  return ['A','B'];
 }
 async function saveSettings(){
   return await dbSetWithRetry('settings', JSON.stringify(SETTINGS), '설정');
@@ -1724,6 +1754,7 @@ function matchCardHTML(m, showActions){
   const timeStr = m.time || '';
   const rsvpCounts = countRSVP(m);
   const isDone = m.status==='done';
+  const isLive = m.status==='live';
   const isInternal = m.matchType === 'internal';
 
   let vsHTML;
@@ -1745,11 +1776,30 @@ function matchCardHTML(m, showActions){
         <span class="team-name">${escapeHTML(m.opponent||'상대팀 미정')}</span>`;
   }
 
+  const statusLabel = isDone ? '종료' : (isLive ? '진행중' : '예정');
+  const statusClass = isDone ? 'done' : (isLive ? 'live' : 'upcoming');
+
+  let actionsHTML = '';
+  if(showActions){
+    if(!isLive && !isDone){
+      actionsHTML = `<button class="btn btn-ghost btn-sm" data-act="rsvp">참석 체크</button>
+                     <button class="btn btn-ghost btn-sm" data-act="teams">팀 편성</button>
+                     <button class="btn btn-primary btn-sm" data-act="start">경기 시작</button>`;
+    }else if(isLive){
+      actionsHTML = `<button class="btn btn-ghost btn-sm" data-act="rsvp">참석 체크</button>
+                     <button class="btn btn-ghost btn-sm" data-act="teams">팀 편성</button>
+                     <button class="btn btn-primary btn-sm" data-act="record">기록 입력</button>`;
+    }else{
+      actionsHTML = isExec() ? `<button class="btn btn-ghost btn-sm" data-act="editresult">결과 수정</button>` : '';
+    }
+    actionsHTML += `<button class="btn btn-danger btn-sm" data-act="delete">삭제</button>`;
+  }
+
   return `
   <div class="match-card" data-id="${m.id}">
     <div class="match-head">
       <span>${dateStr} ${timeStr}</span>
-      <span class="match-status ${isDone?'done':'upcoming'}">${isDone?'종료':'예정'}</span>
+      <span class="match-status ${statusClass}">${statusLabel}</span>
     </div>
     <div class="match-body">
       <div class="match-vs">
@@ -1760,14 +1810,7 @@ function matchCardHTML(m, showActions){
         ${!isDone ? `✅ 참석 ${rsvpCounts.yes} · ❔ 미정 ${rsvpCounts.maybe} · ❌ 불참 ${rsvpCounts.no}` : (m.result?.mom ? `🏅 MOM: ${escapeHTML(memberName(m.result.mom))}` : '')}
         ${isDone && m.quarters && m.quarters.length ? ` · ⏱ ${m.quarters.length}쿼터 진행` : ''}
       </div>
-      ${showActions ? `
-      <div class="match-actions">
-        ${!isDone ? `<button class="btn btn-ghost btn-sm" data-act="rsvp">참석 체크</button>
-                     <button class="btn btn-ghost btn-sm" data-act="teams">팀 편성</button>
-                     <button class="btn btn-primary btn-sm" data-act="finish">결과 입력</button>` :
-                     `<button class="btn btn-ghost btn-sm" data-act="editresult">결과 수정</button>`}
-        <button class="btn btn-danger btn-sm" data-act="delete">삭제</button>
-      </div>` : ''}
+      ${showActions ? `<div class="match-actions">${actionsHTML}</div>` : ''}
     </div>
   </div>`;
 }
@@ -1786,7 +1829,7 @@ function bindMatchCardEvents(container){
   container.querySelectorAll('.match-card').forEach(card=>{
     const id = card.dataset.id;
     card.querySelectorAll('[data-act]').forEach(btn=>{
-      btn.addEventListener('click', (e)=>{
+      btn.addEventListener('click', async (e)=>{
         e.stopPropagation();
         const act = btn.dataset.act;
         const m = MATCHES.find(x=>x.id===id);
@@ -1795,7 +1838,14 @@ function bindMatchCardEvents(container){
           if(!isExec()){ showToast('팀 편성은 집행부만 할 수 있어요'); return; }
           openTeamForm(m);
         }
-        if(act==='finish' || act==='editresult') openResultForm(m);
+        if(act==='start'){
+          if(!isExec()){ showToast('경기 시작은 집행부만 할 수 있어요'); return; }
+          const result = await saveMatchPatch(m.id, (freshM)=>{ freshM.status = 'live'; });
+          if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+          renderAll();
+          showToast('경기를 시작했어요. 이제 쿼터를 등록하고 기록을 입력할 수 있어요');
+        }
+        if(act==='record' || act==='editresult') openResultForm(m);
         if(act==='delete') deleteMatch(m);
       });
     });
@@ -2150,23 +2200,22 @@ const EVENT_TYPES = ['득점','도움','방어','기타'];
 const MAX_QUARTERS = 10;
 
 function openResultForm(m){
+  if(m.status==='upcoming'){ showToast('경기 시작 후에 기록을 입력할 수 있어요'); return; }
   if(!m.quarters) m.quarters = [];
   if(!m.result) m.result = { mom:null };
-  const quartersSnapshot = JSON.parse(JSON.stringify(m.quarters));
-  const resultSnapshot = JSON.parse(JSON.stringify(m.result));
-  const statusSnapshot = m.status;
   const isInternal = m.matchType === 'internal';
   const roster = activeRoster();
   const attending = roster.filter(mem => rsvpStatus(m, mem.id) === 'yes');
   const pool = attending.length ? attending : roster;
   const full = isExec();
   const me = currentMember();
-  const modeColors = isInternal ? (m.teamMode===3 ? ['orange','yellow','black'] : ['orange','yellow']) : null;
+  const isDoneStatus = m.status === 'done';
+  const sideKeys = matchSideKeys(m);
 
   const html = `
-    <div class="modal-head"><h3>경기 결과 입력</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="modal-head"><h3>${isDoneStatus ? '경기 결과 수정' : '경기 기록 입력'}</h3><button class="close-x" onclick="closeModal()">✕</button></div>
     <div class="match-meta" style="margin-bottom:10px;">${isInternal ? '자체경기' : `공사랑FC vs ${escapeHTML(m.opponent||'상대팀')}`}</div>
-    ${!full ? `<div class="match-meta" style="margin-bottom:10px; color:var(--gold);">${me ? '집행부가 아니라서 쿼터 점수는 볼 수만 있고, 본인 기록(득점·도움·방어)만 추가·수정할 수 있어요.' : '본인 확인(👤)을 먼저 해주시면 본인 기록을 입력할 수 있어요.'}</div>` : ''}
+    ${!full ? `<div class="match-meta" style="margin-bottom:10px; color:var(--gold);">${me ? '집행부가 아니라서 쿼터·점수는 볼 수만 있고, 본인 기록(득점·도움·방어)만 바로 추가·수정할 수 있어요. 누르는 즉시 저장돼요.' : '본인 확인(👤)을 먼저 해주시면 본인 기록을 입력할 수 있어요.'}</div>` : ''}
 
     <label>쿼터별 기록 (최대 ${MAX_QUARTERS}쿼터)</label>
     <div id="quarterList"></div>
@@ -2179,15 +2228,15 @@ function openResultForm(m){
     </select>
 
     <div class="modal-foot">
-      <button class="btn btn-ghost btn-block" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary btn-block" id="btnSaveResult">${full?'저장 및 종료':'저장'}</button>
+      <button class="btn btn-ghost btn-block" onclick="closeModal()">닫기</button>
+      ${full ? `<button class="btn btn-primary btn-block" id="btnSaveResult">${isDoneStatus ? '변경사항 저장' : '결과 확정'}</button>` : ''}
     </div>
   `;
   document.getElementById('modalBody').innerHTML = html;
   document.getElementById('overlay').classList.add('active');
 
-  const colorOptionsHTML = (selected) => (modeColors||['orange','yellow','black']).map(c=>
-    `<option value="${c}" ${selected===c?'selected':''}>${TEAM_COLOR_LABEL[c]}</option>`
+  const colorOptionsHTML = (selected) => sideKeys.map(c=>
+    `<option value="${c}" ${selected===c?'selected':''}>${TEAM_COLOR_LABEL[c]||c}</option>`
   ).join('');
 
   function renderQuarters(){
@@ -2197,9 +2246,12 @@ function openResultForm(m){
     }else{
       box.innerHTML = m.quarters.map((q,qi)=>`
         <div class="card" style="padding:12px 14px; margin-bottom:10px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
             <b style="color:var(--gold); font-family:'Oswald',sans-serif;">쿼터 ${qi+1}</b>
-            ${full?`<button class="btn btn-danger btn-sm" data-qdel="${qi}">삭제</button>`:''}
+            <div style="display:flex; gap:6px;">
+              ${full ? `<button class="btn btn-ghost btn-sm" data-qi="${qi}" data-qteam="1">👥 쿼터 팀 조정${q.teams?' (별도)':''}</button>` : ''}
+              ${full?`<button class="btn btn-danger btn-sm" data-qdel="${qi}">삭제</button>`:''}
+            </div>
           </div>
           <div class="row2" style="align-items:center; margin-bottom:8px;">
             <div>
@@ -2239,32 +2291,66 @@ function openResultForm(m){
       `).join('');
     }
 
-    box.querySelectorAll('.q-side1').forEach(el=> el.addEventListener('change', e=>{ m.quarters[e.target.dataset.qi].side1 = e.target.value; }));
-    box.querySelectorAll('.q-side2').forEach(el=> el.addEventListener('change', e=>{ m.quarters[e.target.dataset.qi].side2 = e.target.value; }));
-    box.querySelectorAll('.q-score1').forEach(el=> el.addEventListener('input', e=>{ m.quarters[e.target.dataset.qi].score1 = Number(e.target.value)||0; }));
-    box.querySelectorAll('.q-score2').forEach(el=> el.addEventListener('input', e=>{ m.quarters[e.target.dataset.qi].score2 = Number(e.target.value)||0; }));
-    box.querySelectorAll('[data-qdel]').forEach(el=> el.addEventListener('click', e=>{
-      m.quarters.splice(Number(e.target.dataset.qdel),1);
-      renderQuarters();
-    }));
-    box.querySelectorAll('.ev-member').forEach(el=> el.addEventListener('change', e=>{ if(full) m.quarters[e.target.dataset.qi].events[e.target.dataset.ei].memberId = e.target.value; }));
-    box.querySelectorAll('.ev-type').forEach(el=> el.addEventListener('change', e=>{ m.quarters[e.target.dataset.qi].events[e.target.dataset.ei].type = e.target.value; }));
-    box.querySelectorAll('[data-evdel]').forEach(el=> el.addEventListener('click', e=>{
-      const qi = Number(e.target.dataset.qi), ei = Number(e.target.dataset.ei);
-      const ev = m.quarters[qi].events[ei];
-      if(!full && !(me && ev.memberId===me.id)){ showToast('본인 기록만 삭제할 수 있어요'); return; }
-      m.quarters[qi].events.splice(ei,1);
-      renderQuarters();
-    }));
-    box.querySelectorAll('[data-evadd]').forEach(el=> el.addEventListener('click', e=>{
+    box.querySelectorAll('[data-qteam]').forEach(el=> el.addEventListener('click', e=>{
       const qi = Number(e.target.dataset.qi);
-      m.quarters[qi].events = m.quarters[qi].events || [];
+      openQuarterTeamForm(m, qi, pool, sideKeys);
+    }));
+    box.querySelectorAll('[data-qdel]').forEach(el=> el.addEventListener('click', async e=>{
+      const qi = Number(e.target.dataset.qdel);
+      const result = await saveMatchPatch(m.id, (freshM)=>{ freshM.quarters.splice(qi,1); });
+      if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+      m = result.match;
+      renderQuarters();
+    }));
+    box.querySelectorAll('.ev-member').forEach(el=> el.addEventListener('change', async e=>{
+      if(!full) return;
+      const qi = Number(e.target.dataset.qi), ei = Number(e.target.dataset.ei);
+      const val = e.target.value;
+      const result = await saveMatchPatch(m.id, (freshM)=>{
+        if(freshM.quarters[qi] && freshM.quarters[qi].events[ei]) freshM.quarters[qi].events[ei].memberId = val;
+      });
+      if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+      m = result.match;
+    }));
+    box.querySelectorAll('.ev-type').forEach(el=> el.addEventListener('change', async e=>{
+      const qi = Number(e.target.dataset.qi), ei = Number(e.target.dataset.ei);
+      const val = e.target.value;
+      const result = await saveMatchPatch(m.id, (freshM)=>{
+        if(freshM.quarters[qi] && freshM.quarters[qi].events[ei]) freshM.quarters[qi].events[ei].type = val;
+      });
+      if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+      m = result.match;
+    }));
+    box.querySelectorAll('[data-evdel]').forEach(el=> el.addEventListener('click', async e=>{
+      const qi = Number(e.target.dataset.qi), ei = Number(e.target.dataset.ei);
+      const ev = m.quarters[qi] && m.quarters[qi].events[ei];
+      if(!ev) return;
+      if(!full && !(me && ev.memberId===me.id)){ showToast('본인 기록만 삭제할 수 있어요'); return; }
+      const result = await saveMatchPatch(m.id, (freshM)=>{
+        if(freshM.quarters[qi] && freshM.quarters[qi].events) freshM.quarters[qi].events.splice(ei,1);
+      });
+      if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+      m = result.match;
+      renderQuarters();
+    }));
+    box.querySelectorAll('[data-evadd]').forEach(el=> el.addEventListener('click', async e=>{
+      const qi = Number(e.target.dataset.qi);
       if(full){
         if(pool.length===0){ showToast('참석 인원이 없습니다'); return; }
-        m.quarters[qi].events.push({ memberId: pool[0].id, type:'득점' });
+        const result = await saveMatchPatch(m.id, (freshM)=>{
+          freshM.quarters[qi].events = freshM.quarters[qi].events || [];
+          freshM.quarters[qi].events.push({ memberId: pool[0].id, type:'득점' });
+        });
+        if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+        m = result.match;
       }else{
         if(!me){ showToast('본인 확인(👤)을 먼저 해주세요'); return; }
-        m.quarters[qi].events.push({ memberId: me.id, type:'득점' });
+        const result = await saveMatchPatch(m.id, (freshM)=>{
+          freshM.quarters[qi].events = freshM.quarters[qi].events || [];
+          freshM.quarters[qi].events.push({ memberId: me.id, type:'득점' });
+        });
+        if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+        m = result.match;
       }
       renderQuarters();
     }));
@@ -2272,25 +2358,124 @@ function openResultForm(m){
   renderQuarters();
 
   const addQBtn = document.getElementById('btnAddQuarter');
-  if(addQBtn) addQBtn.addEventListener('click', ()=>{
+  if(addQBtn) addQBtn.addEventListener('click', async ()=>{
     if(m.quarters.length >= MAX_QUARTERS){ showToast(`쿼터는 최대 ${MAX_QUARTERS}개까지예요`); return; }
-    const colors = modeColors || ['orange','yellow','black'];
     const idx = m.quarters.length;
-    m.quarters.push(isInternal
-      ? { side1: colors[idx%colors.length], side2: colors[(idx+1)%colors.length], score1:0, score2:0, events:[] }
-      : { side1:'A', side2:'B', score1:0, score2:0, events:[] }
-    );
+    const newQuarter = isInternal
+      ? { side1: sideKeys[idx%sideKeys.length], side2: sideKeys[(idx+1)%sideKeys.length], score1:0, score2:0, events:[] }
+      : { side1:'A', side2:'B', score1:0, score2:0, events:[] };
+    const result = await saveMatchPatch(m.id, (freshM)=>{ freshM.quarters.push(newQuarter); });
+    if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+    m = result.match;
     renderQuarters();
   });
 
-  document.getElementById('btnSaveResult').addEventListener('click', async ()=>{
-    m.result.mom = document.getElementById('f_mom').value || null;
-    m.status = 'done';
-    const ok = await saveMatches();
-    if(!ok){ m.quarters = quartersSnapshot; m.result = resultSnapshot; m.status = statusSnapshot; renderAll(); return; }
+  const saveBtn = document.getElementById('btnSaveResult');
+  if(saveBtn) saveBtn.addEventListener('click', async ()=>{
+    // 점수/사이드/MOM은 저장 버튼을 누르는 시점에 DOM에서 직접 읽어, 그 사이 다른 사람이
+    // 추가한 쿼터·이벤트를 덮어쓰지 않고 점수 항목만 최신 서버본 위에 반영한다.
+    const scoreEdits = m.quarters.map((q,qi)=>{
+      const side1El = document.querySelector(`.q-side1[data-qi="${qi}"]`);
+      const side2El = document.querySelector(`.q-side2[data-qi="${qi}"]`);
+      const score1El = document.querySelector(`.q-score1[data-qi="${qi}"]`);
+      const score2El = document.querySelector(`.q-score2[data-qi="${qi}"]`);
+      return {
+        side1: side1El ? side1El.value : q.side1,
+        side2: side2El ? side2El.value : q.side2,
+        score1: score1El ? (Number(score1El.value)||0) : q.score1,
+        score2: score2El ? (Number(score2El.value)||0) : q.score2
+      };
+    });
+    const momVal = document.getElementById('f_mom').value || null;
+    const result = await saveMatchPatch(m.id, (freshM)=>{
+      scoreEdits.forEach((edit, i)=>{
+        if(freshM.quarters[i]){
+          freshM.quarters[i].side1 = edit.side1;
+          freshM.quarters[i].side2 = edit.side2;
+          freshM.quarters[i].score1 = edit.score1;
+          freshM.quarters[i].score2 = edit.score2;
+        }
+      });
+      freshM.result.mom = momVal;
+      freshM.status = 'done';
+    });
+    if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
     closeModal();
     renderAll();
-    showToast('경기 결과를 저장했습니다');
+    showToast(isDoneStatus ? '변경사항을 저장했어요' : '경기 결과를 확정했어요');
+  });
+}
+
+function openQuarterTeamForm(m, qi, pool, colors){
+  const q = m.quarters[qi];
+  if(!q) return;
+  let teams = q.teams ? JSON.parse(JSON.stringify(q.teams)) : JSON.parse(JSON.stringify(m.teams || {}));
+  colors.forEach(c=>{ if(!teams[c]) teams[c] = []; });
+  const shortLabel = { orange:'주황', yellow:'노랑', black:'검정', A:'A팀', B:'B팀' };
+
+  const html = `
+    <div class="modal-head"><h3>쿼터 ${qi+1} 팀 조정</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="match-meta" style="margin-bottom:10px;">이 쿼터에서만 적용돼요. 기본 팀 편성과 다르게 할 때만 조정하세요.</div>
+    <div id="qTeamColumns" style="display:grid; gap:8px; grid-template-columns:${colors.map(()=>'1fr').join(' ')};"></div>
+    <label style="margin-top:12px;">미배정 인원</label>
+    <div class="card" id="qTeamPool" style="padding:6px 8px;"></div>
+    <div class="modal-foot">
+      ${q.teams ? `<button class="btn btn-ghost btn-block" id="btnResetQTeam">기본 편성으로 되돌리기</button>` : ''}
+      <button class="btn btn-primary btn-block" id="btnSaveQTeam">저장</button>
+    </div>
+  `;
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('overlay').classList.add('active');
+
+  function render(){
+    document.getElementById('qTeamColumns').innerHTML = colors.map(c=>`
+      <div><label style="font-size:11.5px;">${shortLabel[c]||c} (<span id="qCount_${c}">${teams[c].length}</span>)</label>
+      <div class="card" id="qList_${c}" style="padding:5px 6px; min-height:120px;"></div></div>
+    `).join('');
+    const assigned = new Set(colors.flatMap(c=>teams[c]));
+    const unassigned = pool.filter(mem=>!assigned.has(mem.id));
+    const rowHTML = (mem, zone) => `
+      <div class="member-row" data-id="${mem.id}" style="padding:5px 3px; flex-wrap:wrap;">
+        <div class="jersey" style="width:24px;height:24px;font-size:10px;">${mem.number ?? '-'}</div>
+        <div class="member-info"><div class="name" style="font-size:12px;">${escapeHTML(mem.name)}</div></div>
+        <div style="display:flex; gap:3px; flex-wrap:wrap;">
+          ${colors.filter(c=>c!==zone).map(c=>`<button class="btn btn-ghost btn-sm" style="padding:4px 6px; font-size:10px;" data-to="${c}">${shortLabel[c]||c}</button>`).join('')}
+          ${zone!=='pool'?`<button class="btn btn-ghost btn-sm" style="padding:4px 6px; font-size:10px;" data-to="pool">-</button>`:''}
+        </div>
+      </div>`;
+    colors.forEach(c=>{
+      document.getElementById('qList_'+c).innerHTML = teams[c].length ? teams[c].map(id=>rowHTML(memberById(id), c)).join('') : `<div style="font-size:10.5px;color:var(--chalk-dim);padding:6px;">비어있음</div>`;
+      document.getElementById('qCount_'+c).textContent = teams[c].length;
+    });
+    document.getElementById('qTeamPool').innerHTML = unassigned.length ? unassigned.map(mem=>rowHTML(mem,'pool')).join('') : `<div style="font-size:11px;color:var(--chalk-dim);padding:8px;">모두 배정됨</div>`;
+
+    document.querySelectorAll('#qTeamColumns [data-to], #qTeamPool [data-to]').forEach(btn=>{
+      btn.addEventListener('click', (e)=>{
+        const row = e.target.closest('.member-row');
+        const id = row.dataset.id;
+        colors.forEach(c=>{ teams[c] = teams[c].filter(x=>x!==id); });
+        if(btn.dataset.to !== 'pool') teams[btn.dataset.to].push(id);
+        render();
+      });
+    });
+  }
+  render();
+
+  const resetBtn = document.getElementById('btnResetQTeam');
+  if(resetBtn) resetBtn.addEventListener('click', async ()=>{
+    const result = await saveMatchPatch(m.id, (freshM)=>{ if(freshM.quarters[qi]) delete freshM.quarters[qi].teams; });
+    if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+    closeModal();
+    openResultForm(result.match);
+    showToast('기본 편성으로 되돌렸어요');
+  });
+
+  document.getElementById('btnSaveQTeam').addEventListener('click', async ()=>{
+    const result = await saveMatchPatch(m.id, (freshM)=>{ if(freshM.quarters[qi]) freshM.quarters[qi].teams = teams; });
+    if(!result.ok){ showToast('저장에 실패했어요. 다시 시도해주세요'); return; }
+    closeModal();
+    openResultForm(result.match);
+    showToast(`쿼터 ${qi+1} 팀을 별도로 저장했어요`);
   });
 }
 
